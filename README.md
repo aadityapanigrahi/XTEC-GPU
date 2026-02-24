@@ -2,7 +2,7 @@
 
 **GPU-accelerated X-ray TEmperature Clustering** using PyTorch.
 
-> Venderley *et al.* ([arXiv:2008.03275](https://arxiv.org/abs/2008.03275))
+> Venderley *et al.* ([10.1073/pnas.2109665119](https://doi.org/10.1073/pnas.2109665119))
 
 ## Overview
 
@@ -265,7 +265,7 @@ Original XTEC: **Jordan Venderley**, with modifications by **Krishnanand Mallayy
 
 ## Contact
 
-Krishnanand Mallayya — kmm537@cornell.edu
+Aaditya Panigrahi — ap2563@cornell.edu
 
 ## License
 
