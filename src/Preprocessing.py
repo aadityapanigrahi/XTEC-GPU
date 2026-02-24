@@ -197,6 +197,8 @@ class Mask_Zeros(object):
             zero_mask = (data.float().mean(dim=0) <= 0)
         elif mask_type == "any_zeros":
             zero_mask = (data <= 0).any(dim=0)
+        else:
+            raise ValueError(f"Unknown mask_type: {mask_type}. Expected 'zero_mean' or 'any_zeros'.")
 
         if check4NaN:
             NaN_mask = torch.isnan(data.float()).any(dim=0)
