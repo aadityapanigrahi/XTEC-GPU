@@ -260,7 +260,7 @@ https://dx.doi.org/10.18126/iidy-30e7
 
 ## Attribution
 
-GPU modules: **Yanjun Liu** and **Aaditya Panigrahi**.
+XTEC-GPU: **Yanjun Liu** and **Aaditya Panigrahi**.
 Original XTEC: **Jordan Venderley**, with modifications by **Krishnanand Mallayya**.
 
 ## Contact
