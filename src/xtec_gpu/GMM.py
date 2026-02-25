@@ -235,7 +235,7 @@ class GMM(object):
                 "max_epochs": max_iter, 
                 "accelerator": accelerator, 
                 "devices": devices, 
-                "enable_progress_bar": False,
+                "enable_progress_bar": True,
                 "enable_model_summary": False,
                 **(trainer_params or {})
             }

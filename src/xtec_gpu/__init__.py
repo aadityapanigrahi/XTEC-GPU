@@ -11,9 +11,29 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 # Suppress annoying PyTorch Lightning outputs (like the LitLogger tip)
 import logging
 import warnings
-logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
-logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
-logging.getLogger("lightning.fabric").setLevel(logging.WARNING)
+
+try:
+    import pytorch_lightning
+except ImportError:
+    pass
+
+class _LightningQuietFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        # Suppress everything except actual errors/warnings and progress bars (which bypass logging)
+        if "LitLogger" in msg: return False
+        if "GPU available" in msg: return False
+        if "TPU available" in msg: return False
+        if "LOCAL_RANK" in msg: return False
+        if "stopped:" in msg: return False
+        return True
+
+for logger_name in ["pytorch_lightning", "lightning.pytorch", "lightning.fabric", "lightning_utilities.core.rank_zero", "lightning_utilities"]:
+    logger = logging.getLogger(logger_name)
+    logger.addFilter(_LightningQuietFilter())
+    for handler in logger.handlers:
+        handler.addFilter(_LightningQuietFilter())
+
 warnings.filterwarnings("ignore", ".*GPU available but not used.*")
 
 __version__ = "1.0.0"
