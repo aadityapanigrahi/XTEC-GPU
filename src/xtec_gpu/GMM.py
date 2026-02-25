@@ -207,6 +207,22 @@ class GMM(object):
         km.fit(self.data.detach().cpu().numpy())
         init_means = torch.as_tensor(km.cluster_centers_, dtype=torch.float32, device=self.device)
 
+        # Determine PyTorch Lightning trainer parameters based on device
+        accelerator = "auto"
+        devices = 1
+
+        if self.device.type == "cpu":
+            accelerator = "cpu"
+            devices = "auto"
+        elif self.device.type == "cuda":
+            accelerator = "gpu"
+            # If a specific GPU index was requested (e.g. cuda:1), use list format [1].
+            # Otherwise, use 1 to grab the first available GPU (preventing DDP crashes).
+            devices = [self.device.index] if self.device.index is not None else 1
+        elif self.device.type == "mps":
+            accelerator = "mps"
+            devices = 1
+
         # Build torchgmm model
         self.GaussianMixture = GaussianMixture(
             num_components=cluster_num,
@@ -215,7 +231,12 @@ class GMM(object):
             covariance_regularization=reg_covar,
             init_strategy=init_params,
             init_means=init_means,
-            trainer_params={"max_epochs": max_iter, "devices": 1, "accelerator": "auto", **(trainer_params or {})}
+            trainer_params={
+                "max_epochs": max_iter, 
+                "accelerator": accelerator, 
+                "devices": devices, 
+                **(trainer_params or {})
+            }
         )
 
     def RunEM(self, label_smoothing_flag=False, Markov_matrix=None,

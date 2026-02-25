@@ -132,6 +132,7 @@ xtec-gpu bic-s data.nxs -o results/ --min-nc 2 --max-nc 14
 | `-n` | `4` | Number of clusters |
 | `--rescale` | `mean` | `mean` / `z-score` / `log-mean` / `None` |
 | `--threshold` / `--no-threshold` | on | KL background thresholding |
+| `--device` | `auto` | Specify compute device (`auto`, `cuda`, `cuda:1`, `mps`, `cpu`) |
 | `--entry` | `entry/data` | HDF5 path in `.nxs` file |
 | `--slices` | `None` | Slice string, e.g. `":,0:1,-10:10"` |
 

@@ -60,8 +60,12 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
-def _get_device():
-    """Return the best available torch device (CUDA > MPS > CPU)."""
+def _get_device(device_arg="auto"):
+    """Return the torch device based on user preference or automatic fallback."""
+    if device_arg and device_arg.lower() != "auto":
+        return torch.device(device_arg)
+    
+    # Auto-detection sequence (CUDA > MPS > CPU)
     if torch.cuda.is_available():
         return torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -266,7 +270,7 @@ def _plot_avg_intensities(data, Data_thresh, cluster_assigns, nc, outdir,
 def run_xtec_d(args):
     """XTEC-d: direct GMM clustering via sklearn (GPU preprocessing)."""
     data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device()
+    device = _get_device(args.device)
     nc = args.n_clusters
 
     print(f"[XTEC-d] {nc} clusters | threshold={args.threshold} | "
@@ -320,7 +324,7 @@ def run_xtec_d(args):
 def run_xtec_s(args):
     """XTEC-s: peak-averaged GMM clustering (GPU via torchgmm)."""
     data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device()
+    device = _get_device(args.device)
     nc = args.n_clusters
 
     print(f"[XTEC-s] {nc} clusters | threshold={args.threshold} | "
@@ -374,7 +378,7 @@ def run_xtec_s(args):
 def run_label_smooth(args):
     """XTEC label smooth: GMM with Markov label smoothing (GPU)."""
     data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device()
+    device = _get_device(args.device)
     nc = args.n_clusters
 
     print(f"[Label Smooth] {nc} clusters | threshold={args.threshold} | "
@@ -445,7 +449,7 @@ def run_label_smooth(args):
 def run_bic_d(args):
     """BIC score sweep for XTEC-d."""
     data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device()
+    device = _get_device(args.device)
 
     print(f"[BIC XTEC-d] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={args.threshold} | rescale={args.rescale}")
@@ -488,7 +492,7 @@ def run_bic_d(args):
 def run_bic_s(args):
     """BIC score sweep for XTEC-s (peak averaging)."""
     data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device()
+    device = _get_device(args.device)
 
     print(f"[BIC XTEC-s] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={args.threshold} | rescale={args.rescale}")
@@ -531,7 +535,7 @@ def run_bic_s(args):
 
 def run_test(args):
     """Run a quick sanity check of XTEC-GPU hardware and GMM code."""
-    device = _get_device()
+    device = _get_device(args.device)
     print("=========================================")
     print("XTEC-GPU Hardware & Environment Check")
     print("=========================================")
@@ -612,6 +616,8 @@ def build_parser():
                         choices=["mean", "z-score", "log-mean", "None"],
                         default="mean",
                         help="Rescaling method (default: mean)")
+        sp.add_argument("--device", default="auto", type=str,
+                        help="Compute device: 'auto', 'cpu', 'cuda', 'cuda:1', 'mps' (default: 'auto')")
 
     # -- xtec-d -----------------------------------------------------------
     sp_d = subparsers.add_parser(
@@ -667,6 +673,8 @@ def build_parser():
     # -- test -------------------------------------------------------------
     sp_t = subparsers.add_parser(
         "test", help="Run a quick sanity check of hardware and GMM code")
+    sp_t.add_argument("--device", default="auto", type=str,
+                      help="Compute device: 'auto', 'cpu', 'cuda', 'cuda:1', 'mps' (default: 'auto')")
     sp_t.set_defaults(func=run_test)
 
     return parser
