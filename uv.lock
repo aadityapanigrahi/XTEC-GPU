@@ -4803,8 +4803,6 @@ dependencies = [
     { name = "scipy", version = "1.13.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10' and sys_platform != 'linux'" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10' and sys_platform != 'linux'" },
     { name = "torchgmm", version = "0.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "torchgmm", version = "0.1.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
@@ -4815,6 +4813,10 @@ cu129 = [
     { name = "torch", version = "2.8.0+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "python_full_version < '3.10' and sys_platform == 'linux'" },
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10' and sys_platform != 'linux'" },
     { name = "torch", version = "2.10.0+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "python_full_version >= '3.10' and sys_platform == 'linux'" },
+]
+cu130 = [
+    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10' and sys_platform != 'linux'" },
+    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10' and sys_platform != 'linux'" },
 ]
 nexpy = [
     { name = "nexpy" },
@@ -4829,14 +4831,14 @@ requires-dist = [
     { name = "numpy" },
     { name = "scikit-learn" },
     { name = "scipy" },
-    { name = "torch", marker = "sys_platform != 'linux'", specifier = ">=1.13" },
-    { name = "torch", marker = "sys_platform == 'linux' and extra == 'cu129'", specifier = ">=1.13", index = "https://download.pytorch.org/whl/cu129" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'cu129'", specifier = ">=2.8", index = "https://download.pytorch.org/whl/cu129" },
-    { name = "torch", marker = "sys_platform == 'linux' and extra != 'cu129'", specifier = ">=1.13", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torch", marker = "sys_platform == 'linux' and extra != 'cu129' and extra == 'cu130'", specifier = ">=2.8", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torch", marker = "sys_platform == 'linux' and extra == 'cu129' and extra == 'cu130'", specifier = ">=2.8", index = "https://download.pytorch.org/whl/cu129" },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'cu129'", specifier = ">=2.8" },
+    { name = "torch", marker = "sys_platform != 'linux' and extra == 'cu130'", specifier = ">=2.8" },
     { name = "torchgmm" },
 ]
-provides-extras = ["nexpy", "cu129"]
+provides-extras = ["nexpy", "cu129", "cu130"]
 
 [[package]]
 name = "yarl"

@@ -28,7 +28,6 @@ dependencies = [
     "scipy",
     "scikit-learn",
     "matplotlib",
-    "torch>=1.13",
     "torchgmm",
     "nexusformat",
     "h5py",
@@ -36,7 +35,14 @@ dependencies = [
 
 [project.optional-dependencies]
 nexpy = ["nexpy"]
+
+# Choose exactly one of these extras when syncing:
+#   uv sync --extra cu129
+#   uv sync --extra cu130
+#
+# (If you prefer a default, keep cu130 and just don't pass --extra.)
 cu129 = ["torch>=2.8"]
+cu130 = ["torch>=2.8"]
 
 [project.scripts]
 xtec-gpu = "xtec_gpu.xtec_cli:main"
@@ -55,12 +61,7 @@ where = ["src"]
 line-length = 79
 
 # ── uv-specific configuration ──────────────────────────────────────
-# Usage (to add this project with CUDA support to another uv project):
-#   uv add .            # Default: CUDA 13.0
-#   uv add ".[cu129]"   # CUDA 12.9 (e.g. Polaris @ ALCF)
-#
-# (To simply sync the local development environment, use: uv sync)
-
+# PyTorch CUDA wheel indexes (explicit so uv won't use them unless directed).
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
@@ -71,8 +72,10 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+# Route torch to the correct index depending on the selected extra.
+# Using explicitly disjoint markers so uv resolves correctly.
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu129", marker = "sys_platform == 'linux' and extra == 'cu129'" },
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux' and extra != 'cu129'" },
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and extra == 'cu129'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' and extra == 'cu130' and extra != 'cu129'" },
 ]
