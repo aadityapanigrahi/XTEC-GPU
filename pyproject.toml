@@ -36,11 +36,14 @@ dependencies = [
 [project.optional-dependencies]
 nexpy = ["nexpy"]
 
-# Choose exactly one of these extras when syncing:
+# Choose exactly one of these extras when syncing local development:
 #   uv sync --extra cu129
 #   uv sync --extra cu130
 #
-# (If you prefer a default, keep cu130 and just don't pass --extra.)
+# To install this package into another project (like on ALCF Polaris):
+#   uv add "xtec-gpu[cu129] @ git+https://github.com/aadityapanigrahi/XTEC-GPU.git"
+#
+# (If you prefer a default CPU/CUDA 13.0, keep cu130 and just don't pass --extra.)
 cu129 = ["torch>=2.8"]
 cu130 = ["torch>=2.8"]
 
