@@ -367,7 +367,7 @@ def run_xtec_s(args):
     cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
 
     elapsed = time.time() - t0
-    print(f"  Clustering completed in {elapsed:.2f} s")
+    print(f"\n  Clustering completed in {elapsed:.2f} s")
     print(f"  Cluster sizes: {clusterGMM.num_per_cluster}")
 
     # Deterministic cluster ordering (descending low-T intensity)
@@ -438,7 +438,7 @@ def run_label_smooth(args):
     cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
 
     elapsed = time.time() - t0
-    print(f"  Clustering completed in {elapsed:.2f} s")
+    print(f"\n  Clustering completed in {elapsed:.2f} s")
     print(f"  Cluster sizes: {clusterGMM.num_per_cluster}")
 
     # Deterministic cluster ordering (descending low-T intensity)
@@ -582,9 +582,9 @@ def run_test(args):
         clusterGMM = GMM(data_torch.T, N_clusters)
         print("Done.")
 
-        print("Running EM... ", end="", flush=True)
+        print("Running EM... ")
         clusterGMM.RunEM()
-        print("Done.")
+        print("\nDone.")
         print(f"Found cluster sizes: {clusterGMM.num_per_cluster}")
         print(f"Synthetic test completed in {time.time() - t0:.2f} s")
         print("\nAll systems nominal. ✅")
