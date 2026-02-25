@@ -524,6 +524,55 @@ def run_bic_s(args):
     print(f"  BIC plot saved to {path}")
 
 
+def run_test(args):
+    """Run a quick sanity check of XTEC-GPU hardware and GMM code."""
+    device = _get_device()
+    print("=========================================")
+    print("XTEC-GPU Hardware & Environment Check")
+    print("=========================================")
+    try:
+        from importlib.metadata import version
+        pkg_version = version("XTEC-GPU")
+    except Exception:
+        pkg_version = "unknown"
+    
+    print(f"XTEC-GPU version:{pkg_version}")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available:  {torch.cuda.is_available()}")
+    has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    print(f"MPS available:   {has_mps}")
+    print(f"Selected device: {device}")
+
+    print("\n[Running synthetic GMM test]")
+    # Create simple synthetic data
+    N_data = 2000
+    N_temp = 50
+    N_clusters = 3
+    print(f"Generating synthetic data: {N_data} points, {N_temp} temperatures")
+    data_np = np.random.rand(N_data, N_temp).astype(np.float32)
+
+    t0 = time.time()
+    try:
+        data_torch = torch.as_tensor(data_np).to(device)
+        print("Data transferred to device successfully.")
+
+        print(f"Instantiating torchgmm ({N_clusters} clusters)... ", end="", flush=True)
+        clusterGMM = GMM(data_torch.T, N_clusters)
+        print("Done.")
+
+        print("Running EM... ", end="", flush=True)
+        clusterGMM.RunEM()
+        print("Done.")
+        print(f"Found cluster sizes: {clusterGMM.num_per_cluster}")
+        print(f"Synthetic test completed in {time.time() - t0:.2f} s")
+        print("\nAll systems nominal. ✅")
+    except Exception as e:
+        print(f"\n❌ Error during execution:\n{e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -609,6 +658,11 @@ def build_parser():
     sp_bs.add_argument("--max-nc", type=int, default=14,
                        help="Maximum number of clusters (default: 14)")
     sp_bs.set_defaults(func=run_bic_s)
+
+    # -- test -------------------------------------------------------------
+    sp_t = subparsers.add_parser(
+        "test", help="Run a quick sanity check of hardware and GMM code")
+    sp_t.set_defaults(func=run_test)
 
     return parser
 
