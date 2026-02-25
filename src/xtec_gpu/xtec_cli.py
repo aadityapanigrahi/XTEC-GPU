@@ -30,12 +30,6 @@ plots) into the specified output directory.
 
 import argparse
 import os
-
-# Prevent OpenBLAS/OMP from spawning too many threads on restricted HPC login nodes,
-# which causes "Resource temporarily unavailable" errors during import.
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-
 import sys
 import time
 
