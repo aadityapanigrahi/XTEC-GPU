@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.eggs/
 build/
 dist/
 .DS_Store
@@ -8,3 +9,5 @@ dist/
 *.nxs
 *.hdf5
 *.h5
+venv/
+.venv/

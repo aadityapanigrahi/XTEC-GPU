@@ -36,16 +36,17 @@ pip install -e .
 XTEC-GPU/
 ├── README.md
 ├── LICENSE
-├── setup.py
+├── pyproject.toml
 ├── .gitignore
 ├── src/
-│   ├── __init__.py
-│   ├── GMM.py               # GMM + GMM_kernels + label smoothing
-│   ├── Preprocessing.py     # Mask_Zeros, Threshold, Peak_averaging
-│   ├── xtec_cli.py          # Command-line interface
-│   └── plugins/
-│       ├── __init__.py       # NeXpy plugin entry point
-│       └── cluster_data.py   # NeXpy GUI plugin
+│   └── xtec_gpu/
+│       ├── __init__.py
+│       ├── GMM.py               # GMM + GMM_kernels + label smoothing
+│       ├── Preprocessing.py     # Mask_Zeros, Threshold, Peak_averaging
+│       ├── xtec_cli.py          # Command-line interface
+│       └── plugins/
+│           ├── __init__.py      # NeXpy plugin entry point
+│           └── cluster_data.py  # NeXpy GUI plugin
 └── tutorials/
     ├── Tutorial_XTEC_GPU-d.ipynb
     └── Tutorial_XTEC_GPU-s_with_peak_averaging.ipynb
@@ -56,12 +57,9 @@ XTEC-GPU/
 ## Python API
 
 ```python
-import sys
-sys.path.append('src/')
-
 import torch
-from Preprocessing import Mask_Zeros, Threshold_Background, Peak_averaging
-from GMM import GMM, GMM_kernels
+from xtec_gpu.Preprocessing import Mask_Zeros, Threshold_Background, Peak_averaging
+from xtec_gpu.GMM import GMM, GMM_kernels
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ```

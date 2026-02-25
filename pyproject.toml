@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "XTEC-GPU"
+version = "1.0.0"
+description = "X-ray Temperature Clustering — GPU-accelerated"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Yanjun Liu"},
+    {name = "Aaditya Panigrahi", email = "ap2563@cornell.edu"},
+]
+maintainers = [
+    {name = "Aaditya Panigrahi", email = "ap2563@cornell.edu"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "torch>=1.13",
+    "torchgmm",
+    "nexusformat",
+    "h5py",
+]
+
+[project.optional-dependencies]
+nexpy = ["nexpy"]
+
+[project.scripts]
+xtec-gpu = "xtec_gpu.xtec_cli:main"
+
+[project.entry-points."nexpy.plugins"]
+xtec_gpu = "xtec_gpu.plugins:plugin_menu"
+
+[project.urls]
+Homepage = "https://github.com/KimGroup/XTEC-GPU"
+Repository = "https://github.com/KimGroup/XTEC-GPU"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 79
