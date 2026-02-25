@@ -72,7 +72,6 @@ API overview
   - :staticmethod:`Build_Markov_Matrix(data_inds, L_scale=1, kernel_type='local', ...)`
 """
 
-from sklearn.cluster import KMeans
 import numpy as np
 from torchgmm.bayes import GaussianMixture
 import torch
@@ -201,11 +200,8 @@ class GMM(object):
         else:
             self.data = torch.as_tensor(self.data, dtype=torch.float32, device=self.device)
 
-        # Use scikit-learn KMeans to obtain robust initial means.
-        # Tip: use an integer (e.g., 10) for broader sklearn version compatibility.
-        km = KMeans(n_clusters=cluster_num, n_init='auto', random_state=random_state)
-        km.fit(self.data.detach().cpu().numpy())
-        init_means = torch.as_tensor(km.cluster_centers_, dtype=torch.float32, device=self.device)
+        # We rely entirely on torchgmm's internal init_strategy (e.g. 'kmeans')
+        init_means = None
 
         # Determine PyTorch Lightning trainer parameters based on device
         accelerator = "auto"
