@@ -35,6 +35,7 @@ for logger_name in ["pytorch_lightning", "lightning.pytorch", "lightning.fabric"
         handler.addFilter(_LightningQuietFilter())
 
 warnings.filterwarnings("ignore", ".*GPU available but not used.*")
+warnings.filterwarnings("ignore", ".*Sparse CSR tensor support is in beta state.*")
 
 __version__ = "1.0.0"
 
