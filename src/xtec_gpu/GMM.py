@@ -215,7 +215,7 @@ class GMM(object):
             covariance_regularization=reg_covar,
             init_strategy=init_params,
             init_means=init_means,
-            trainer_params={"max_epochs": max_iter, **(trainer_params or {})}
+            trainer_params={"max_epochs": max_iter, "devices": 1, "accelerator": "auto", **(trainer_params or {})}
         )
 
     def RunEM(self, label_smoothing_flag=False, Markov_matrix=None,
