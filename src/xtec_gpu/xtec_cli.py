@@ -565,6 +565,32 @@ def run_test(args):
     print(f"MPS available:   {has_mps}")
     print(f"Selected device: {device}")
 
+    print("\n[Running synthetic Preprocessing test]")
+    prep_data = np.random.rand(50, 30, 30).astype(np.float32)
+    # Inject zeros to test Mask_Zeros
+    prep_data[:, 0:10, :] = 0.0
+    
+    t0_prep = time.time()
+    try:
+        prep_torch = torch.as_tensor(prep_data).to(device)
+        print("Testing Mask_Zeros... ", end="", flush=True)
+        mask = Mask_Zeros(prep_torch, mask_type="zero_mean")
+        print(f"Retained {mask.data_nonzero.shape[1]} / {mask.data_shape[1]*mask.data_shape[2]} pixels.")
+        
+        print("Testing Threshold_Background... ", end="", flush=True)
+        thresh = Threshold_Background(mask, threshold_type="simple")
+        print(f"Cutoff: {thresh.LogI_cutoff:.2f}. Passed: {thresh.data_thresholded.shape[1]}")
+        
+        print("Testing Peak_averaging... ", end="", flush=True)
+        peaks = Peak_averaging(prep_torch, thresh, device=device)
+        print(f"Found {peaks.peak_avg_data.shape[1]} peaks.")
+        print(f"Preprocessing test completed in {time.time() - t0_prep:.2f} s")
+    except Exception as e:
+        print(f"\n❌ Preprocessing Error:\n{e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
     print("\n[Running synthetic GMM test]")
     # Create simple synthetic data
     N_data = 2000
