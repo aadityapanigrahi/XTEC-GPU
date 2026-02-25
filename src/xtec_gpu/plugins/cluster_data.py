@@ -198,8 +198,13 @@ class XTECDialog(NXDialog):
         self.pushbutton["Plot Average Intensity"].setEnabled(enable)
 
     def _get_device(self):
-        """Return the best available torch device."""
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        """Return the best available torch device (CUDA > MPS > CPU)."""
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            return torch.device("mps")
+        else:
+            return torch.device("cpu")
 
     def _rescale(self, threshold, Data_thresh):
         """Apply the user-selected rescaling to thresholded data.

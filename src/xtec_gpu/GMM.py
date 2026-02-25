@@ -829,8 +829,12 @@ class GMM_kernels(object):
         if device is None:
             if torch.is_tensor(data_inds):
                 device = data_inds.device
+            elif torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif torch.backends.mps.is_available():
+                device = torch.device("mps")
             else:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                device = torch.device("cpu")
         else:
             device = torch.device(device)
 
