@@ -61,8 +61,13 @@ def _to_numpy(x):
 
 
 def _get_device():
-    """Return the best available torch device."""
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    """Return the best available torch device (CUDA > MPS > CPU)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
 
 
 def _load_data(filepath, entry_path, slices):
