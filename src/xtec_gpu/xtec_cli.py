@@ -584,6 +584,11 @@ def run_test(args):
         print("Testing Peak_averaging... ", end="", flush=True)
         peaks = Peak_averaging(prep_torch, thresh, device=device)
         print(f"Found {peaks.peak_avg_data.shape[1]} peaks.")
+
+        print("Testing Markov Matrix builder... ", end="", flush=True)
+        M = GMM_kernels.Build_Markov_Matrix(thresh.ind_thresholded, L_scale=1.0, device=device)
+        print(f"Created {M.shape} sparse matrix.")
+
         print(f"Preprocessing test completed in {time.time() - t0_prep:.2f} s")
     except Exception as e:
         print(f"\n❌ Preprocessing Error:\n{e}")
