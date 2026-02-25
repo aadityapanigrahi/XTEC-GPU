@@ -106,6 +106,9 @@ gmm.RunEM(label_smoothing_flag=True, Markov_matrix=Markov)
 ## Command-Line Interface
 
 ```bash
+# Hardware & Environment Sanity Check
+xtec-gpu test
+
 # XTEC-d
 xtec-gpu xtec-d data.nxs -o results/ -n 4 --rescale mean
 
