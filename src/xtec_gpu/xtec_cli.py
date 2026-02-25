@@ -67,7 +67,20 @@ def _get_device(device_arg="auto"):
     
     # Auto-detection sequence (CUDA > MPS > CPU)
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        # Find the CUDA device with the most free memory
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            best_gpu = 0
+            max_free = -1
+            for i in range(num_gpus):
+                # mem_get_info returns (free, total)
+                free, total = torch.cuda.mem_get_info(i)
+                if free > max_free:
+                    max_free = free
+                    best_gpu = i
+            return torch.device(f"cuda:{best_gpu}")
+        else:
+            return torch.device("cuda")
     elif torch.backends.mps.is_available():
         return torch.device("mps")
     else:
