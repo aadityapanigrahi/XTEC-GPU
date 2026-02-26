@@ -9,7 +9,7 @@ Usage examples
 --------------
 ::
 
-    # XTEC-d (direct GMM via sklearn, GPU preprocessing)
+    # XTEC-d (direct GMM via torchgmm, GPU preprocessing)
     xtec-gpu xtec-d data.nxs -o results/ -n 4 --rescale mean
 
     # XTEC-s (peak-averaged GMM via torchgmm on GPU)
@@ -140,6 +140,27 @@ def _rescale(threshold, Data_thresh, rescale_text, device):
         return Rescaled - torch.mean(Rescaled, dim=0)
     else:  # "None"
         return Data_thresh
+
+
+def _gmm_parameter_count(n_components, n_features, cov_type="diag"):
+    """Return free-parameter count for a Gaussian mixture model."""
+    if cov_type == "diag":
+        cov_params = n_components * n_features
+    elif cov_type == "full":
+        cov_params = n_components * (n_features * (n_features + 1) // 2)
+    else:
+        raise ValueError(f"Unsupported covariance type: {cov_type}")
+
+    mean_params = n_components * n_features
+    weight_params = n_components - 1
+    return int(cov_params + mean_params + weight_params)
+
+
+def _bic_from_loglikelihood(log_likelihood, n_components, n_features, n_samples,
+                            cov_type="diag"):
+    """Compute BIC from log-likelihood and model dimensionality."""
+    p = _gmm_parameter_count(n_components, n_features, cov_type=cov_type)
+    return -2.0 * float(log_likelihood) + p * np.log(float(n_samples))
 
 
 def _reorder_clusters(cluster_assigns, pixel_assigns, cluster_means,
@@ -281,7 +302,7 @@ def _plot_avg_intensities(data, Data_thresh, cluster_assigns, nc, outdir,
 # ---------------------------------------------------------------------------
 
 def run_xtec_d(args):
-    """XTEC-d: direct GMM clustering via sklearn (GPU preprocessing)."""
+    """XTEC-d: direct GMM clustering (torchgmm, GPU preprocessing)."""
     data = _load_data(args.input, args.entry, args.slices)
     device = _get_device(args.device)
     nc = args.n_clusters
@@ -299,15 +320,13 @@ def run_xtec_d(args):
 
     Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
 
-    from sklearn.mixture import GaussianMixture
-    Data_for_GMM = _to_numpy(Rescaled_data).transpose()
-    gm = GaussianMixture(
-        n_components=nc, covariance_type="diag", random_state=0
-    ).fit(Data_for_GMM)
-    cluster_assigns = gm.predict(Data_for_GMM)
+    Data_for_GMM = Rescaled_data.T
+    clusterGMM = GMM(Data_for_GMM, nc, cov_type="diag", random_state=0)
+    clusterGMM.RunEM()
 
-    cluster_means = gm.means_
-    cluster_covs = gm.covariances_
+    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+    cluster_means = _to_numpy(clusterGMM.means)
+    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
 
     Data_thresh_np = _to_numpy(Data_thresh)
     Data_ind_np = _to_numpy(Data_ind)
@@ -460,7 +479,7 @@ def run_label_smooth(args):
 
 
 def run_bic_d(args):
-    """BIC score sweep for XTEC-d."""
+    """BIC score sweep for XTEC-d (torchgmm)."""
     data = _load_data(args.input, args.entry, args.slices)
     device = _get_device(args.device)
 
@@ -475,15 +494,23 @@ def run_bic_d(args):
 
     Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
 
-    from sklearn.mixture import GaussianMixture
-    Data_for_GMM = _to_numpy(Rescaled_data).transpose()
+    Data_for_GMM = Rescaled_data.T
+    n_samples, n_features = map(int, Data_for_GMM.shape)
 
     ks = np.arange(args.min_nc, args.max_nc)
     bics = []
     for k in ks:
-        gm = GaussianMixture(n_components=k, covariance_type="diag")
-        gm.fit(Data_for_GMM)
-        bics.append(gm.bic(Data_for_GMM))
+        clusterGMM = GMM(Data_for_GMM, int(k), cov_type="diag", random_state=0)
+        clusterGMM.RunEM()
+        bics.append(
+            _bic_from_loglikelihood(
+                clusterGMM.log_likelihood,
+                n_components=int(k),
+                n_features=n_features,
+                n_samples=n_samples,
+                cov_type="diag",
+            )
+        )
         print(f"  k={k}: BIC={bics[-1]:.2f}")
 
     os.makedirs(args.output, exist_ok=True)
@@ -503,7 +530,7 @@ def run_bic_d(args):
 
 
 def run_bic_s(args):
-    """BIC score sweep for XTEC-s (peak averaging)."""
+    """BIC score sweep for XTEC-s (peak averaging, torchgmm)."""
     data = _load_data(args.input, args.entry, args.slices)
     device = _get_device(args.device)
 
@@ -519,15 +546,23 @@ def run_bic_s(args):
 
     Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
 
-    from sklearn.mixture import GaussianMixture
-    Data_for_GMM = _to_numpy(Rescaled_data).transpose()
+    Data_for_GMM = Rescaled_data.T
+    n_samples, n_features = map(int, Data_for_GMM.shape)
 
     ks = np.arange(args.min_nc, args.max_nc)
     bics = []
     for k in ks:
-        gm = GaussianMixture(n_components=k, covariance_type="diag")
-        gm.fit(Data_for_GMM)
-        bics.append(gm.bic(Data_for_GMM))
+        clusterGMM = GMM(Data_for_GMM, int(k), cov_type="diag", random_state=0)
+        clusterGMM.RunEM()
+        bics.append(
+            _bic_from_loglikelihood(
+                clusterGMM.log_likelihood,
+                n_components=int(k),
+                n_features=n_features,
+                n_samples=n_samples,
+                cov_type="diag",
+            )
+        )
         print(f"  k={k}: BIC={bics[-1]:.2f}")
 
     os.makedirs(args.output, exist_ok=True)
@@ -665,7 +700,7 @@ def build_parser():
 
     # -- xtec-d -----------------------------------------------------------
     sp_d = subparsers.add_parser(
-        "xtec-d", help="XTEC-d: direct GMM (sklearn) with GPU preprocessing")
+        "xtec-d", help="XTEC-d: direct GMM (torchgmm) with GPU preprocessing")
     _add_common(sp_d)
     sp_d.add_argument("-n", "--n-clusters", type=int, default=4,
                       help="Number of clusters (default: 4)")

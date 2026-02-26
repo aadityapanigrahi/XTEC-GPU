@@ -1,18 +1,18 @@
 """
-Gaussian Mixture Model (GMM) clustering (torchgmm + KMeans seeding)
+Gaussian Mixture Model (GMM) clustering (torchgmm)
 ===================================================================
 
 This module provides a PyTorch-based Gaussian Mixture Model workflow for
 clustering temperature trajectories shaped ``(num_data, num_T)``. It uses
-**torchgmm** for EM optimization and initializes component means with
-scikit-learn **KMeans** for stable starts. After fitting, it exposes
+**torchgmm** for EM optimization and torch-native component mean
+initialization. After fitting, it exposes
 responsibilities, hard labels, component means/covariances, and convenient
 plotting utilities.
 
 Contents
 --------
 - :class:`GMM` — main wrapper around ``torchgmm.bayes.GaussianMixture`` with
-  KMeans seeding and NumPy-friendly outputs.
+  torch-native initialization and NumPy-friendly outputs.
 - :class:`Cluster_Gaussian` — lightweight container exposing per-cluster
   mean and (diagonal or full) covariance for plotting/inspection.
 
@@ -37,9 +37,9 @@ Notes
 - **Covariance types:** ``cov_type='diag'`` yields per-component diagonal
   variances of shape ``(K, num_T)``; ``'full'`` yields full matrices
   ``(K, num_T, num_T)``.
-- **Initialization:** Means are seeded via scikit-learn KMeans and passed to
-  ``torchgmm``; this is typically more stable than the built-in init for
-  trajectory data.
+- **Initialization:** Means are seeded with a torch-native KMeans++
+  initializer on the active device to improve stability while keeping the
+  fitting path torch-native.
 - **Devices:** If ``data`` is a CUDA tensor, fitting runs on the same device.
   Public arrays are converted to NumPy on CPU for downstream interoperability.
 - **Mixing weights:** The mixture weights :math:`\pi_k` are computed as the
@@ -50,7 +50,6 @@ Dependencies
 ------------
 - PyTorch
 - NumPy
-- scikit-learn (for KMeans seeding)
 - torchgmm
 - Matplotlib (optional; for plotting helpers)
 
@@ -82,7 +81,7 @@ from matplotlib import colors
 class GMM(object):
     """
     Independent PyTorch implementation using **torchgmm** for EM and
-    scikit-learn **KMeans** for mean initialization.
+    torch-native KMeans++ initialization for component means.
 
     The model clusters samples shaped as `(num_data, num_T)` into
     `cluster_num` Gaussian components. Means are seeded by running KMeans
@@ -151,7 +150,7 @@ class GMM(object):
         cov_type : {'diag', 'full'}, default='diag'
             Covariance structure for the mixture components.
         n_init : int, default=1
-            (Kept for interface compatibility; KMeans seeding inside uses its own `n_init`.)
+            Kept for interface compatibility.
         tol : float, default=1e-4
             Convergence tolerance for EM.
         reg_covar : float, default=1e-6
@@ -164,7 +163,7 @@ class GMM(object):
         device : str or torch.device, optional
             Target device for the torch tensors.
         random_state : int or None, optional
-            Random seed used for KMeans seeding (and possibly torchgmm).
+            Random seed used for KMeans++ mean initialization.
         warm_start, verbose, verbose_interval, weights_init, means_init, precisions_init :
             Kept for API compatibility; not used directly in this wrapper.
         color_list : list[str], optional
@@ -200,8 +199,10 @@ class GMM(object):
         else:
             self.data = torch.as_tensor(self.data, dtype=torch.float32, device=self.device)
 
-        # We rely entirely on torchgmm's internal init_strategy (e.g. 'kmeans')
-        init_means = None
+        # Torch-native KMeans++ initialization for stable EM starts.
+        init_means = self._init_means_kmeanspp(
+            self.data, cluster_num=cluster_num, random_state=random_state
+        )
 
         # Determine PyTorch Lightning trainer parameters based on device
         accelerator = "auto"
@@ -236,6 +237,53 @@ class GMM(object):
                 **(trainer_params or {})
             }
         )
+
+    @staticmethod
+    def _init_means_kmeanspp(data, cluster_num, random_state=None):
+        """Choose initial means with torch-native KMeans++."""
+        n_samples = int(data.shape[0])
+        if n_samples == 0:
+            raise ValueError("Cannot initialize GMM means from empty data.")
+
+        generator = torch.Generator()
+        if random_state is not None:
+            generator.manual_seed(int(random_state))
+
+        # First center: uniformly random sample.
+        first_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
+        chosen = [first_idx]
+        chosen_mask = torch.zeros(n_samples, dtype=torch.bool, device=data.device)
+        chosen_mask[first_idx] = True
+
+        first_center = data[first_idx].unsqueeze(0)
+        min_dist_sq = torch.sum((data - first_center) ** 2, dim=1)
+
+        while len(chosen) < cluster_num:
+            if n_samples >= cluster_num:
+                # Prevent duplicates when enough points exist.
+                dist_sq = min_dist_sq.clone()
+                dist_sq[chosen_mask] = 0.0
+            else:
+                # Allow duplicates only when K > N.
+                dist_sq = min_dist_sq
+
+            total = torch.sum(dist_sq)
+            if float(total.item()) <= 0.0:
+                # Degenerate case (e.g., identical points): fallback to random.
+                next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
+            else:
+                probs_cpu = (dist_sq / total).detach().cpu()
+                next_idx = int(torch.multinomial(probs_cpu, 1, generator=generator).item())
+
+            chosen.append(next_idx)
+            chosen_mask[next_idx] = True
+
+            next_center = data[next_idx].unsqueeze(0)
+            next_dist_sq = torch.sum((data - next_center) ** 2, dim=1)
+            min_dist_sq = torch.minimum(min_dist_sq, next_dist_sq)
+
+        idx = torch.as_tensor(chosen, dtype=torch.long, device=data.device)
+        return data[idx].clone()
 
     def RunEM(self, label_smoothing_flag=False, Markov_matrix=None,
               smoothing_iterations=1, max_smooth_epoch=500, tol=None):
@@ -281,11 +329,14 @@ class GMM(object):
         self.GaussianMixture.fit(X)
 
         # Extract initial parameters as torch tensors on device
-        self.means = self.GaussianMixture.model_.means.detach().clone()  # (K, T)
-        self.covs = self.GaussianMixture.model_.covariances.detach().clone()  # (K, T) or (K,T,T)
+        self.means = self.GaussianMixture.model_.means.detach().clone().to(self.device)  # (K, T)
+        self.covs = self.GaussianMixture.model_.covariances.detach().clone().to(self.device)  # (K, T) or (K,T,T)
 
         # Compute initial responsibilities on device
-        probs = self.GaussianMixture.predict_proba(X).T  # (K, N) torch on device
+        probs = self.GaussianMixture.predict_proba(X)
+        if not torch.is_tensor(probs):
+            probs = torch.as_tensor(probs, dtype=torch.float32)
+        probs = probs.to(self.device).T  # (K, N)
         self.cluster_probs = probs.detach().clone()
 
         # Mixing weights from responsibilities
@@ -298,7 +349,8 @@ class GMM(object):
                     "Markov_matrix is required when label_smoothing_flag=True. "
                     "Use GMM_kernels.Build_Markov_Matrix() to construct one."
                 )
-            self.Markov_matrix = Markov_matrix
+            # Keep Markov_matrix on the same device as model tensors for sparse.mm.
+            self.Markov_matrix = Markov_matrix.to(self.device)
 
             loglikelihood_diff = 1e6
             loglikelihood_new = torch.tensor(-1e6, device=self.device)
@@ -326,6 +378,7 @@ class GMM(object):
                     break
 
         # ---- Finalise: move everything to numpy for downstream use -----------
+        self.log_likelihood = float(self._LogLikelihood_torch(X).detach().cpu().item())
         self.cluster_assignments = (
             torch.argmax(self.cluster_probs, dim=0).detach().cpu().numpy()
         )
@@ -497,6 +550,8 @@ class GMM(object):
             plt.figure()
             # plot each trajectory colored by its assigned label
             data_TN = self.data.transpose(0, 1) if self.data.ndim == 2 else self.data.T
+            if torch.is_tensor(data_TN):
+                data_TN = data_TN.detach().cpu().numpy()
             for i in range(data_TN.shape[1]):
                 plt.plot(
                     x_train,
@@ -732,11 +787,15 @@ class GMM(object):
         num_peaks = Peak_avg_data.shape[1]
         for i in range(num_peaks):
             inds_i = Peak_avg_ind_list[i]  # (n_i, D) tensor/ndarray
-            Data_ind.append(np.asarray(inds_i))
+            if torch.is_tensor(inds_i):
+                inds_i_np = inds_i.detach().cpu().numpy()
+            else:
+                inds_i_np = np.asarray(inds_i)
+            Data_ind.append(inds_i_np)
             # cluster_assignments is over samples (rows in data); here we map
             # the i-th peak-average trajectory's label to all its pixels.
             Pixel_assignments.append(
-                np.full((np.asarray(inds_i).shape[0],), self.cluster_assignments[i], dtype=int)
+                np.full((inds_i_np.shape[0],), self.cluster_assignments[i], dtype=int)
             )
 
         self.Data_ind = np.vstack(Data_ind) if Data_ind else np.empty((0, 0), dtype=int)
