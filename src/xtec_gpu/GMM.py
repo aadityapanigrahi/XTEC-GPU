@@ -982,23 +982,21 @@ class GMM_kernels(object):
             torch.stack([rows, cols]), vals, size=(N, N), device=device
         ).coalesce()
 
-        Markov_matrix = coo.to_sparse_csr().to(torch.float32)
+        coo = coo.to(torch.float32)
 
         # ---- L1 row-normalise -------------------------------------------------
         # row_sum via sparse mm with ones vector
         ones = torch.ones(N, 1, device=device)
-        row_sums = torch.sparse.mm(Markov_matrix, ones).squeeze(1)  # (N,)
+        row_sums = torch.sparse.mm(coo, ones).squeeze(1)  # (N,)
         row_sums = row_sums.clamp(min=1e-12)
 
         # Scale values: divide each nonzero by its row sum
-        crow = Markov_matrix.crow_indices()
-        vals_csr = Markov_matrix.values().clone()
-        for i in range(N):
-            vals_csr[crow[i]:crow[i + 1]] /= row_sums[i]
+        row_indices = coo.indices()[0]
+        vals_scaled = coo.values() / row_sums[row_indices]
 
-        Markov_matrix = torch.sparse_csr_tensor(
-            crow, Markov_matrix.col_indices(), vals_csr, size=(N, N), device=device
-        )
+        Markov_matrix = torch.sparse_coo_tensor(
+            coo.indices(), vals_scaled, size=(N, N), device=device
+        ).coalesce()
 
         elapsed = time.time() - start_time
         print(f"\tFinished Building Adjacency Matrix in {elapsed:.2f} s\n")
