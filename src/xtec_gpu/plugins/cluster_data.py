@@ -5,10 +5,53 @@ from nexpy.gui.utils import display_message, report_error
 from nexpy.gui.pyqt import QtWidgets
 from nexpy.gui.widgets import NXComboBox, NXLabel, NXSpinBox
 from nexusformat.nexus import NeXusError, NXdata, NXfield
-from sklearn.mixture import GaussianMixture
 from ..Preprocessing import Mask_Zeros, Peak_averaging, Threshold_Background
 from ..GMM import GMM, GMM_kernels
 
+
+
+def _gmm_parameter_count(n_components, n_features, cov_type="diag"):
+    if cov_type == "diag":
+        cov_params = n_components * n_features
+    elif cov_type == "full":
+        cov_params = n_components * (n_features * (n_features + 1) // 2)
+    else:
+        raise ValueError(f"Unsupported covariance type: {cov_type}")
+
+    mean_params = n_components * n_features
+    weight_params = n_components - 1
+    return int(cov_params + mean_params + weight_params)
+
+
+def _bic_from_loglikelihood(log_likelihood, n_components, n_features, n_samples,
+                            cov_type="diag"):
+    p = _gmm_parameter_count(n_components, n_features, cov_type=cov_type)
+    return -2.0 * float(log_likelihood) + p * np.log(float(n_samples))
+
+
+def _reorder_clusters(cluster_assigns, pixel_assigns, cluster_means,
+                      cluster_covs, Data_thresh_np, nc, temp_values):
+    T = len(temp_values)
+    n_low = max(1, int(T * 0.1))  
+    low_T_indices = np.argsort(temp_values)[:n_low]
+    low_T_avg = np.zeros(nc)
+    for k in range(nc):
+        mask_k = cluster_assigns == k
+        if mask_k.any():
+            low_T_avg[k] = Data_thresh_np[low_T_indices][:, mask_k].mean()
+        else:
+            low_T_avg[k] = -np.inf  
+    new_order = np.argsort(-low_T_avg)
+    old_to_new = np.empty(nc, dtype=int)
+    for new_label, old_label in enumerate(new_order):
+        old_to_new[old_label] = new_label
+
+    cluster_assigns = old_to_new[cluster_assigns]
+    pixel_assigns = old_to_new[pixel_assigns]
+    cluster_means = cluster_means[new_order]
+    cluster_covs = [cluster_covs[i] for i in new_order]
+
+    return cluster_assigns, pixel_assigns, cluster_means, cluster_covs
 
 def _to_numpy(x):
     """Convert a torch.Tensor to NumPy; pass through if already ndarray."""
@@ -260,15 +303,22 @@ class XTECDialog(NXDialog):
 
         Rescaled_data = self._rescale(threshold, Data_thresh)
 
-        # sklearn GaussianMixture requires numpy
-        Data_for_GMM = _to_numpy(Rescaled_data).transpose()
-        gm = GaussianMixture(
-            n_components=self.nc, covariance_type="diag", random_state=0
-        ).fit(Data_for_GMM)
-        cluster_assigns = gm.predict(Data_for_GMM)
+        Data_for_GMM = Rescaled_data.T
+        clusterGMM = GMM(Data_for_GMM, self.nc, cov_type="diag", random_state=0)
+        clusterGMM.RunEM()
 
-        self.cluster_means = gm.means_
-        self.cluster_covs = gm.covariances_
+        cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+        cluster_means = _to_numpy(clusterGMM.means)
+        cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(self.nc)]
+
+        temp_values = self.data.nxaxes[0].nxvalue
+        cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(cluster_assigns, cluster_assigns,
+                              cluster_means, cluster_covs,
+                              self.Data_thresh, self.nc, temp_values)
+
+        self.cluster_means = cluster_means
+        self.cluster_covs = cluster_covs
         self.cluster_assigns = cluster_assigns
         self.pixel_assigns = cluster_assigns
         self.image_data = None
@@ -304,14 +354,25 @@ class XTECDialog(NXDialog):
         clusterGMM.Get_pixel_labels(Peak_avg)
 
         # Convert to numpy only for plotting / NXdata
-        self.Data_thresh = _to_numpy(Data_thresh)
-        self.Data_ind = _to_numpy(clusterGMM.Data_ind)
-        self.cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
-        self.pixel_assigns = _to_numpy(clusterGMM.Pixel_assignments)
-        self.cluster_means = _to_numpy(clusterGMM.means)
-        self.cluster_covs = [
-            _to_numpy(clusterGMM.cluster[i].cov) for i in range(self.nc)
-        ]
+        Data_thresh_np = _to_numpy(Data_thresh)
+        Data_ind_np = _to_numpy(clusterGMM.Data_ind)
+        cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+        pixel_assigns = _to_numpy(clusterGMM.Pixel_assignments)
+        cluster_means = _to_numpy(clusterGMM.means)
+        cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(self.nc)]
+
+        temp_values = self.data.nxaxes[0].nxvalue
+        cluster_assigns, pixel_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(cluster_assigns, pixel_assigns,
+                              cluster_means, cluster_covs,
+                              Data_thresh_np, self.nc, temp_values)
+
+        self.Data_thresh = Data_thresh_np
+        self.Data_ind = Data_ind_np
+        self.cluster_assigns = cluster_assigns
+        self.pixel_assigns = pixel_assigns
+        self.cluster_means = cluster_means
+        self.cluster_covs = cluster_covs
 
         self.image_data = None
         self.enable_plots(enable=True)
@@ -368,14 +429,19 @@ class XTECDialog(NXDialog):
         )
 
         cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
-        pixel_assigns = cluster_assigns
+        cluster_means = _to_numpy(clusterGMM.means)
+        cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(self.nc)]
+
+        temp_values = self.data.nxaxes[0].nxvalue
+        cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(cluster_assigns, cluster_assigns,
+                              cluster_means, cluster_covs,
+                              self.Data_thresh, self.nc, temp_values)
 
         self.cluster_assigns = cluster_assigns
-        self.pixel_assigns = pixel_assigns
-        self.cluster_means = _to_numpy(clusterGMM.means)
-        self.cluster_covs = [
-            _to_numpy(clusterGMM.cluster[i].cov) for i in range(self.nc)
-        ]
+        self.pixel_assigns = cluster_assigns
+        self.cluster_means = cluster_means
+        self.cluster_covs = cluster_covs
         self.image_data = None
         self.enable_plots(enable=True)
 
@@ -400,15 +466,23 @@ class XTECDialog(NXDialog):
 
         Rescaled_data = self._rescale(threshold, Data_thresh)
 
-        # sklearn requires numpy
-        Data_for_GMM = _to_numpy(Rescaled_data).transpose()
+        Data_for_GMM = Rescaled_data.T
+        n_samples, n_features = map(int, Data_for_GMM.shape)
 
         ks = np.arange(nc_min, nc_max)
         bics = []
         for k in ks:
-            gm = GaussianMixture(n_components=k, covariance_type="diag")
-            gm.fit(Data_for_GMM)
-            bics.append(gm.bic(Data_for_GMM))
+            clusterGMM = GMM(Data_for_GMM, int(k), cov_type="diag", random_state=0)
+            clusterGMM.RunEM()
+            bics.append(
+                _bic_from_loglikelihood(
+                    clusterGMM.log_likelihood,
+                    n_components=int(k),
+                    n_features=n_features,
+                    n_samples=n_samples,
+                    cov_type="diag",
+                )
+            )
         y_data = NXdata(
             NXfield(bics, name="BIC"),
             NXfield(ks, name="N_cluster"),
@@ -440,15 +514,23 @@ class XTECDialog(NXDialog):
 
         Rescaled_data = self._rescale(threshold, Data_thresh)
 
-        # sklearn requires numpy
-        Data_for_GMM = _to_numpy(Rescaled_data).transpose()
+        Data_for_GMM = Rescaled_data.T
+        n_samples, n_features = map(int, Data_for_GMM.shape)
 
         ks = np.arange(nc_min, nc_max)
         bics = []
         for k in ks:
-            gm = GaussianMixture(n_components=k, covariance_type="diag")
-            gm.fit(Data_for_GMM)
-            bics.append(gm.bic(Data_for_GMM))
+            clusterGMM = GMM(Data_for_GMM, int(k), cov_type="diag", random_state=0)
+            clusterGMM.RunEM()
+            bics.append(
+                _bic_from_loglikelihood(
+                    clusterGMM.log_likelihood,
+                    n_components=int(k),
+                    n_features=n_features,
+                    n_samples=n_samples,
+                    cov_type="diag",
+                )
+            )
         y_data = NXdata(
             NXfield(bics, name="BIC"),
             NXfield(ks, name="N_cluster"),
