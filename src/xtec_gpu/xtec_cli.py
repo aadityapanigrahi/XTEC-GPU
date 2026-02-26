@@ -244,8 +244,18 @@ def _plot_qmap(data, Data_ind, pixel_assigns, nc, outdir, prefix=""):
         cluster_image[c_ind] = i + 1
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    im = ax.imshow(cluster_image, origin="lower", cmap="viridis")
-    ax.set_title("Cluster Q Map")
+    if cluster_image.ndim == 3:
+        mid = cluster_image.shape[0] // 2
+        im = ax.imshow(cluster_image[mid], origin="lower", cmap="viridis")
+        ax.set_title(f"Cluster Q Map (Slice {mid})")
+    elif cluster_image.ndim == 2:
+        im = ax.imshow(cluster_image, origin="lower", cmap="viridis")
+        ax.set_title("Cluster Q Map")
+    else:
+        print("  Q-map has unsupported shape, skipping plot.")
+        plt.close(fig)
+        return
+        
     plt.colorbar(im, ax=ax, label="Cluster ID")
     path = os.path.join(outdir, f"{prefix}qmap.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
