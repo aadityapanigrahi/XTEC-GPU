@@ -4786,7 +4786,7 @@ wheels = [
 
 [[package]]
 name = "xtec-gpu"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "h5py", version = "3.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
