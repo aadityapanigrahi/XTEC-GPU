@@ -922,55 +922,136 @@ class GMM_kernels(object):
                 unit_cell_shape = unit_cell_shape.to(device=device, dtype=torch.float32)
 
         N = data_inds.shape[0]
+        D = data_inds.shape[1]
         inv_L2 = 1.0 / (L_scale ** 2)
+
+        # Dynamic chunk size to bound memory allocation (Limit to ~250MB per chunk allocation if possible)
+        # N=10E6 * C* D * 4 = 120M * C bytes... -> 120MB per C. Max C <= 20
+        # Check actual available mem inside torch
+        if device.type == "cuda":
+            free_mem, _ = torch.cuda.mem_get_info(device)
+            # Use 20% of free mem as safety bound
+            safe_mem = free_mem * 0.2
+            # bytes per element: (D bytes)
+            max_c = max(1, int(safe_mem / (N * 4)))
+            chunk_size = min(chunk_size, max_c)
+        else:
+            chunk_size = min(chunk_size, 512)
 
         # ---- Build COO indices in chunks --------------------------------------
         # Processing in chunks of rows avoids allocating a full (N, N) dense
         # matrix which would be prohibitive for large datasets.
+        
+        # =========================================================================
+        # --- MEMORY-OPTIMIZED CPU VERSION (COMMENTED OUT FOR FUTURE USE) ---
+        # The default GPU implementation below can cause OOM errors on large datasets.
+        # You can uncomment this block (and comment out the GPU loop below) to run
+        # the Markov Matrix building on CPU with minimal memory overhead via SciPy.
+        #
+        # D = data_inds.shape[1]
+        # import scipy.sparse as sp
+        # data_inds_np = data_inds.cpu().numpy()
+        # if unit_cell_shape is not None:
+        #     unit_cell_shape_np = unit_cell_shape.cpu().numpy() if torch.is_tensor(unit_cell_shape) else np.asarray(unit_cell_shape)
+        #
+        # row_list, col_list, val_list = [], [], []
+        # for start in range(0, N, chunk_size):
+        #     end = min(start + chunk_size, N)
+        #     chunk_inds = data_inds_np[start:end]
+        #     C = end - start
+        #     dist_sq = np.zeros((C, N), dtype=np.float32)
+        #
+        #     if kernel_type == "local":
+        #         for d in range(D):
+        #             diff_d = chunk_inds[:, d:d+1] - data_inds_np[:, d:d+1].T
+        #             dist_sq += diff_d ** 2
+        #         kernel_vals = np.exp(-dist_sq * inv_L2)
+        #     elif kernel_type == "periodic":
+        #         for d in range(D):
+        #             diff_d = chunk_inds[:, d:d+1] - data_inds_np[:, d:d+1].T
+        #             dist_sq += np.sin(np.pi / unit_cell_shape_np[d] * diff_d) ** 2
+        #         kernel_vals = np.exp(-dist_sq * inv_L2)
+        #
+        #     mask = kernel_vals > zero_cutoff
+        #     rows_chunk, cols_chunk = np.where(mask)
+        #     rows_chunk = rows_chunk + start
+        #
+        #     if uniform_similarity:
+        #         vals_chunk = np.ones(rows_chunk.shape[0], dtype=np.float32)
+        #     else:
+        #         vals_chunk = kernel_vals[mask]
+        #
+        #     row_list.append(rows_chunk)
+        #     col_list.append(cols_chunk)
+        #     val_list.append(vals_chunk)
+        #
+        # rows = np.concatenate(row_list)
+        # cols = np.concatenate(col_list)
+        # vals = np.concatenate(val_list)
+        # csr = sp.csr_matrix((vals, (rows, cols)), shape=(N, N))
+        #
+        # crow_indices = torch.from_numpy(csr.indptr).to(device, dtype=torch.int32)
+        # col_indices = torch.from_numpy(csr.indices).to(device, dtype=torch.int32)
+        # values = torch.from_numpy(csr.data).to(device, dtype=torch.float32)
+        # coo = torch.sparse_csr_tensor(crow_indices, col_indices, values, size=(N, N))
+        # coo = coo.to(torch.float32)
+        # =========================================================================
+
         row_list = []
         col_list = []
         val_list = []
 
-        for start in range(0, N, chunk_size):
+        start = 0
+        while start < N:
             end = min(start + chunk_size, N)
-            # chunk_inds: (chunk, D),  data_inds: (N, D)
-            chunk_inds = data_inds[start:end]  # (C, D)
+            
+            try:
+                # Attempt to build chunk
+                chunk_inds = data_inds[start:end]
+                
+                # Expand diff natively using loop to prevent full (C, N, D) allocation
+                kernel_vals = torch.zeros(end - start, N, device=device, dtype=torch.float32)
+                
+                if kernel_type == "local":
+                    dist_sq = torch.cdist(chunk_inds, data_inds, p=2.0) ** 2
+                    kernel_vals = torch.exp(-dist_sq * inv_L2)
+                    del dist_sq
+                elif kernel_type == "periodic":
+                    for d in range(D):
+                        diff_d = chunk_inds[:, d:d+1] - data_inds[:, d:d+1].T
+                        kernel_vals += torch.sin(torch.pi / unit_cell_shape[d] * diff_d) ** 2
+                        del diff_d
+                    kernel_vals = torch.exp(-kernel_vals * inv_L2)
+                else:
+                    raise ValueError(f"Invalid kernel_type: {kernel_type!r}")
 
-            # diff: (C, N, D)
-            diff = chunk_inds.unsqueeze(1) - data_inds.unsqueeze(0)
+                # Sparsify: keep entries above cutoff
+                mask = kernel_vals > zero_cutoff  # (C, N)
+                rows_chunk, cols_chunk = torch.where(mask)  # local-row, global-col
+                rows_chunk = rows_chunk + start  # shift to global row index
 
-            if kernel_type == "local":
-                # exp[-sum_d (q_i - q_j)^2 / L^2]
-                kernel_vals = torch.exp(
-                    -torch.sum(diff ** 2, dim=2) * inv_L2
-                )  # (C, N)
-            elif kernel_type == "periodic":
-                # exp[-sum_d sin(pi/L_cell * (q_i - q_j))^2 / L^2]
-                kernel_vals = torch.exp(
-                    -torch.sum(
-                        torch.sin(torch.pi / unit_cell_shape * diff) ** 2,
-                        dim=2,
-                    ) * inv_L2
-                )  # (C, N)
-            else:
-                raise ValueError(f"Invalid kernel_type: {kernel_type!r}")
+                if uniform_similarity:
+                    vals_chunk = torch.ones(rows_chunk.shape[0], dtype=torch.float32, device=device)
+                else:
+                    vals_chunk = kernel_vals[mask]
 
-            # Sparsify: keep entries above cutoff
-            mask = kernel_vals > zero_cutoff  # (C, N)
-            rows_chunk, cols_chunk = torch.where(mask)  # local-row, global-col
-            rows_chunk = rows_chunk + start  # shift to global row index
+                # Move extracted entries to CPU to avoid accumulating on GPU and free up memory
+                row_list.append(rows_chunk.cpu())
+                col_list.append(cols_chunk.cpu())
+                val_list.append(vals_chunk.cpu())
 
-            if uniform_similarity:
-                vals_chunk = torch.ones(rows_chunk.shape[0], device=device)
-            else:
-                vals_chunk = kernel_vals[mask]
-
-            row_list.append(rows_chunk)
-            col_list.append(cols_chunk)
-            val_list.append(vals_chunk)
-
-            # Free intermediate memory
-            del diff, kernel_vals, mask
+                del kernel_vals, mask
+                torch.cuda.empty_cache()
+                
+                # Successfully computed chunk, advance pointer
+                start = end
+            except torch.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                # If OOM out, half the chunk size and try again purely on this block
+                if chunk_size <= 1:
+                    raise MemoryError("Chunk size reduced to 1 but still OOM trying to build Adjacency matrix")
+                chunk_size = max(1, chunk_size // 2)
+                continue
 
         # ---- Assemble sparse CSR tensor ---------------------------------------
         rows = torch.cat(row_list)

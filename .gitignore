@@ -11,3 +11,5 @@ dist/
 *.h5
 venv/
 .venv/
+*.sh
+*.ipynb
