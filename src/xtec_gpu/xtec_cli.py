@@ -419,73 +419,33 @@ def run_xtec_s(args):
 
 def run_label_smooth(args):
     """XTEC label smooth: GMM with Markov label smoothing (GPU)."""
-    data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device(args.device)
-    nc = args.n_clusters
-
-    print(f"[Label Smooth] {nc} clusters | threshold={args.threshold} | "
-          f"rescale={args.rescale} | L_scale={args.L_scale} | "
-          f"smooth_type={args.smooth_type} | device={device}")
-
-    t0 = time.time()
-    thresh_type = "KL" if args.threshold else "No threshold"
-    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
-    threshold = Threshold_Background(masked, threshold_type=thresh_type,
-                                     device=device)
-    Data_thresh = threshold.data_thresholded
-    Data_ind = threshold.ind_thresholded
-
-    Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
-
-    # Build unit cell shape for periodic kernel
-    kernel_type = args.smooth_type
-    unit_cell_shape = None
-    if kernel_type == "periodic":
-        unit_cell_shape = []
-        for nxq in data.nxaxes[1:]:
-            q = nxq.nxvalue
-            x = np.min(q[q % 1 == 0])
-            l = len(nxq[x : x + 1]) - 1
-            unit_cell_shape.append(l)
-        unit_cell_shape = np.array(unit_cell_shape)
-
-    # Build Markov matrix on GPU
-    Markov_matrix = GMM_kernels.Build_Markov_Matrix(
-        Data_ind, args.L_scale, kernel_type, unit_cell_shape, device=device
-    )
-
-    Data_for_GMM = Rescaled_data.T
-    clusterGMM = GMM(Data_for_GMM, nc)
-    clusterGMM.RunEM(
-        label_smoothing_flag=True, Markov_matrix=Markov_matrix
-    )
-
-    Data_thresh_np = _to_numpy(Data_thresh)
-    Data_ind_np = _to_numpy(Data_ind)
-    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
-    cluster_means = _to_numpy(clusterGMM.means)
-    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
-
-    elapsed = time.time() - t0
-    print(f"\n  Clustering completed in {elapsed:.2f} s")
-    print(f"  Cluster sizes: {clusterGMM.num_per_cluster}")
-
-    # Deterministic cluster ordering (descending low-T intensity)
-    temp_values = data.nxaxes[0].nxvalue
-    cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
-        _reorder_clusters(cluster_assigns, cluster_assigns,
-                          cluster_means, cluster_covs,
-                          Data_thresh_np, nc, temp_values)
-    print(f"  Reordered cluster sizes: "
-          f"{[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
-
-    _save_results(args.output, cluster_assigns, cluster_assigns, Data_ind_np,
-                  Data_thresh_np, cluster_means, cluster_covs)
-    _plot_qmap(data, Data_ind_np, cluster_assigns, nc, args.output)
-    _plot_trajectories(data, cluster_means, cluster_covs, nc, args.rescale,
-                       args.output)
-    _plot_avg_intensities(data, Data_thresh_np, cluster_assigns, nc,
-                          args.output)
+    print("\n[Under Construction] Label smoothening is currently disabled due to "
+          "out-of-memory issues on extremely large datasets. It will be patched soon.")
+    
+    # PATCH INSTRUCTIONS FOR FUTURE REFERNCE:
+    # Use a 3-layer strategy.
+    # 
+    # Immediate (no algorithm change)
+    # Lower chunk_size in Build_Markov_Matrix (4096 -> 512 or 256).
+    # Increase zero_cutoff (1e-2 -> 5e-2) if acceptable.
+    # Reduce L_scale slightly.
+    # Force cov_type="diag" for GMM (already default).
+    # 
+    # Keep exact functionality, fix memory properly
+    # In GMM.py, replace (row_chunk x N) build with 2D tiling (row_chunk x col_chunk).
+    # Accumulate row/col/val on CPU torch tensors (.cpu()), not GPU lists.
+    # Keep kernel/cutoff/row-normalization unchanged, so behavior matches old code.
+    # 
+    # Add CLI args in xtec_cli.py:
+    # --markov-row-chunk
+    # --markov-col-chunk
+    # --zero-cutoff
+    # 
+    # Robust scaling
+    # Auto-select chunk sizes from free VRAM (torch.cuda.mem_get_info) with a safety margin (e.g., 60%).
+    # Optional fallback: if CUDA OOM during Markov build, retry with half chunk sizes automatically.
+    
+    return
 
 
 def run_bic_d(args):
