@@ -94,6 +94,29 @@ def parse_args():
                         help="Optional NumPy random seed for the CPU GMM")
     parser.add_argument("--gpu-random-state", type=int, default=None,
                         help="Optional random seed passed to the GPU tutorial CLI")
+    parser.add_argument("--gpu-solver-mode",
+                        choices=["torchgmm", "legacy-stepwise"],
+                        default="torchgmm",
+                        help="GPU tutorial solver backend (default: torchgmm)")
+    parser.add_argument("--gpu-init-strategy-mode",
+                        choices=["kmeans++", "xtec", "sklearn-kmeans"],
+                        default="sklearn-kmeans",
+                        help="GPU tutorial initialization strategy "
+                             "(default: sklearn-kmeans)")
+    parser.add_argument("--gpu-post-stepwise-epochs", type=int, default=0,
+                        help="GPU tutorial post-fit stepwise refinement epochs "
+                             "(default: 0)")
+    parser.add_argument("--gpu-post-stepwise-tol", type=float, default=None,
+                        help="GPU tutorial post-fit refinement tolerance "
+                             "(default: None)")
+    parser.add_argument("--gpu-batch-num", type=int, default=1,
+                        help="GPU legacy-stepwise batch count (default: 1)")
+    parser.add_argument("--gpu-max-batch-epoch", type=int, default=50,
+                        help="GPU legacy-stepwise max batch epochs "
+                             "(default: 50)")
+    parser.add_argument("--gpu-max-full-epoch", type=int, default=500,
+                        help="GPU legacy-stepwise max full-data epochs "
+                             "(default: 500)")
     parser.add_argument("--cpu-max-batch-epoch", type=int, default=50,
                         help="CPU reference GMM max_batch_epoch "
                              "(default: 50, matching the reference repo)")
@@ -522,6 +545,18 @@ def run_gpu_cli(args, repo_root, output_dir):
         str(args.slice_value),
         "--zoom-window",
         args.zoom_window,
+        "--solver-mode",
+        args.gpu_solver_mode,
+        "--init-strategy-mode",
+        args.gpu_init_strategy_mode,
+        "--post-stepwise-epochs",
+        str(args.gpu_post_stepwise_epochs),
+        "--batch-num",
+        str(args.gpu_batch_num),
+        "--max-batch-epoch",
+        str(args.gpu_max_batch_epoch),
+        "--max-full-epoch",
+        str(args.gpu_max_full_epoch),
     ]
 
     if args.slices:
@@ -534,6 +569,8 @@ def run_gpu_cli(args, repo_root, output_dir):
         cmd.extend(["--bad-clusters", args.bad_clusters])
     if args.gpu_random_state is not None:
         cmd.extend(["--random-state", str(args.gpu_random_state)])
+    if args.gpu_post_stepwise_tol is not None:
+        cmd.extend(["--post-stepwise-tol", str(args.gpu_post_stepwise_tol)])
 
     (output_dir / "command.txt").write_text(" ".join(cmd) + "\n")
     subprocess.run(cmd, check=True, env=env)
@@ -550,6 +587,13 @@ def run_gpu_cli(args, repo_root, output_dir):
         "gpu_device": args.gpu_device,
         "command": cmd,
         "gpu_random_state": args.gpu_random_state,
+        "gpu_solver_mode": args.gpu_solver_mode,
+        "gpu_init_strategy_mode": args.gpu_init_strategy_mode,
+        "gpu_post_stepwise_epochs": args.gpu_post_stepwise_epochs,
+        "gpu_post_stepwise_tol": args.gpu_post_stepwise_tol,
+        "gpu_batch_num": args.gpu_batch_num,
+        "gpu_max_batch_epoch": args.gpu_max_batch_epoch,
+        "gpu_max_full_epoch": args.gpu_max_full_epoch,
     })
     metadata_path.write_text(json.dumps(metadata, indent=2))
     return metadata
