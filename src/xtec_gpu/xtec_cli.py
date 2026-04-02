@@ -1240,7 +1240,7 @@ def build_parser():
                         help="GMM solver backend "
                              f"(default: {solver_mode_default})")
         sp.add_argument("--init-strategy-mode",
-                        choices=["kmeans++", "xtec", "sklearn-kmeans"],
+                        choices=["kmeans++", "xtec", "sklearn-kmeans", "cuml-kmeans"],
                         default=init_strategy_default,
                         help="Cluster-mean initialization strategy "
                              f"(default: {init_strategy_default})")

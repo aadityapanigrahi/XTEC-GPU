@@ -72,6 +72,10 @@ API overview
 """
 
 import numpy as np
+try:
+    from cuml.cluster import KMeans as CuMLKMeans
+except Exception:
+    CuMLKMeans = None
 from torchgmm.bayes import GaussianMixture
 import torch
 import matplotlib.pyplot as plt
@@ -182,13 +186,14 @@ class GMM(object):
             Fitting backend. ``"torchgmm"`` keeps the existing fast path.
             ``"legacy-stepwise"`` runs a GPU-native port of the original XTEC
             stepwise EM updates for closer CPU parity.
-        init_strategy_mode : {"kmeans++", "xtec", "sklearn-kmeans"}, default="kmeans++"
+        init_strategy_mode : {"kmeans++", "xtec", "sklearn-kmeans", "cuml-kmeans"}, default="kmeans++"
             Mean initialization used before fitting. ``"kmeans++"`` favors
             stability and speed. ``"xtec"`` mimics the original CPU repo by
             drawing each initial mean from a Gaussian with the dataset mean and
             covariance. ``"sklearn-kmeans"`` reproduces the original Yanjun GPU
             tutorial path by running scikit-learn KMeans once to obtain stable
-            initial means for torchgmm.
+            initial means for torchgmm. ``"cuml-kmeans"`` runs RAPIDS cuML
+            KMeans on GPU to avoid CPU round-trips.
         post_stepwise_epochs : int, default=0
             Number of GPU-native full-data stepwise EM refinement iterations to
             run after the initial torchgmm fit. This moves the solution closer
@@ -251,9 +256,13 @@ class GMM(object):
             init_means = self._init_means_sklearn_kmeans(
                 self.data, cluster_num=cluster_num, random_state=random_state
             )
+        elif self.init_strategy_mode == "cuml-kmeans":
+            init_means = self._init_means_cuml_kmeans(
+                self.data, cluster_num=cluster_num, random_state=random_state
+            )
         else:
             raise ValueError(
-                "init_strategy_mode must be 'kmeans++', 'xtec', or 'sklearn-kmeans'. "
+                "init_strategy_mode must be 'kmeans++', 'xtec', 'sklearn-kmeans', or 'cuml-kmeans'. "
                 f"Received: {init_strategy_mode!r}"
             )
 
@@ -343,7 +352,16 @@ class GMM(object):
             total = torch.sum(dist_sq)
             if float(total.item()) <= 0.0:
                 # Degenerate case (e.g., identical points): fallback to random.
-                next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
+                # When K <= N, enforce unique picks to avoid duplicate centers.
+                if n_samples >= cluster_num:
+                    remaining = torch.nonzero(~chosen_mask, as_tuple=False).flatten()
+                    if remaining.numel() == 0:
+                        next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
+                    else:
+                        pick = int(torch.randint(0, int(remaining.numel()), (1,), generator=generator).item())
+                        next_idx = int(remaining[pick].item())
+                else:
+                    next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
             else:
                 probs_cpu = (dist_sq / total).detach().cpu()
                 next_idx = int(torch.multinomial(probs_cpu, 1, generator=generator).item())
@@ -396,6 +414,49 @@ class GMM(object):
             dtype=data.dtype,
             device=data.device,
         )
+
+    @staticmethod
+    def _init_means_cuml_kmeans(data, cluster_num, random_state=None):
+        """GPU-native KMeans initialization using RAPIDS cuML."""
+        if data.shape[0] == 0:
+            raise ValueError("Cannot initialize GMM means from empty data.")
+        km_cls = CuMLKMeans
+        if km_cls is None:
+            # Retry import at call time so runtime library-path setup can take effect.
+            try:
+                from cuml.cluster import KMeans as km_cls
+            except Exception as exc:
+                raise ImportError(
+                    "init_strategy_mode='cuml-kmeans' requires RAPIDS cuML "
+                    "(e.g., `pip install cuml-cu12`). "
+                    f"Underlying import error: {exc}"
+                ) from exc
+        if data.device.type != "cuda":
+            raise ValueError(
+                "init_strategy_mode='cuml-kmeans' requires CUDA tensors/device."
+            )
+        try:
+            import cupy as cp
+        except Exception as exc:
+            raise ImportError(
+                "init_strategy_mode='cuml-kmeans' requires CuPy "
+                "(normally installed with RAPIDS cuML)."
+            ) from exc
+
+        km = km_cls(
+            n_clusters=cluster_num,
+            random_state=random_state,
+            n_init=10,
+            max_iter=300,
+            tol=1e-4,
+        )
+
+        # Use DLPack to keep tensor transfers on GPU without CPU round-trips.
+        data_cupy = cp.from_dlpack(data.contiguous())
+        km.fit(data_cupy)
+        centers_cupy = km.cluster_centers_
+        centers_torch = torch.from_dlpack(centers_cupy)
+        return centers_torch.to(dtype=data.dtype, device=data.device)
 
     def RunEM(self, label_smoothing_flag=False, Markov_matrix=None,
               smoothing_iterations=1, max_smooth_epoch=500, tol=None):

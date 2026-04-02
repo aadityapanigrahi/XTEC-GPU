@@ -99,7 +99,7 @@ def parse_args():
                         default="torchgmm",
                         help="GPU tutorial solver backend (default: torchgmm)")
     parser.add_argument("--gpu-init-strategy-mode",
-                        choices=["kmeans++", "xtec", "sklearn-kmeans"],
+                        choices=["kmeans++", "xtec", "sklearn-kmeans", "cuml-kmeans"],
                         default="sklearn-kmeans",
                         help="GPU tutorial initialization strategy "
                              "(default: sklearn-kmeans)")
