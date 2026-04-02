@@ -9,6 +9,8 @@ dist/
 *.nxs
 *.hdf5
 *.h5
+tutorial_cli_runs/
+comparison_runs/
 venv/
 .venv/
 *.sh

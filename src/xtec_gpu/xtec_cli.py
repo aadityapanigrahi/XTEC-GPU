@@ -12,6 +12,9 @@ Usage examples
     # XTEC-d (direct GMM via torchgmm, GPU preprocessing)
     xtec-gpu xtec-d data.nxs -o results/ -n 4 --rescale mean
 
+    # Tutorial-faithful XTEC-d workflow (threshold plots + second pass)
+    xtec-gpu tutorial-d data.nxs -o tutorial_results/ --device cuda:1
+
     # XTEC-s (peak-averaged GMM via torchgmm on GPU)
     xtec-gpu xtec-s data.nxs -o results/ -n 4
 
@@ -30,6 +33,7 @@ plots) into the specified output directory.
 
 import argparse
 import os
+import pickle
 import sys
 import time
 
@@ -142,6 +146,159 @@ def _rescale(threshold, Data_thresh, rescale_text, device):
         return Data_thresh
 
 
+def _axis_display_name(nxaxis):
+    """Return a compact display name for an NX axis."""
+    name = getattr(nxaxis, "nxname", str(nxaxis))
+    if name.lower().startswith("q") and len(name) == 2:
+        return name[1:].upper()
+    return name
+
+
+def _parse_int_list(text):
+    """Parse a comma-separated integer list."""
+    if text is None:
+        return None
+    values = []
+    for part in text.split(","):
+        part = part.strip()
+        if part:
+            values.append(int(part))
+    return values
+
+
+def _parse_zoom_window(text):
+    """Parse tutorial zoom text of the form '200:300,0:100'."""
+    if text is None:
+        return None
+    try:
+        row_text, col_text = [piece.strip() for piece in text.split(",", 1)]
+        row_start, row_stop = [int(v) for v in row_text.split(":", 1)]
+        col_start, col_stop = [int(v) for v in col_text.split(":", 1)]
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid zoom window '{text}'. Expected format 'row0:row1,col0:col1'."
+        ) from exc
+
+    if row_start >= row_stop or col_start >= col_stop:
+        raise ValueError(
+            f"Invalid zoom window '{text}'. Start indices must be < stop indices."
+        )
+    return slice(row_start, row_stop), slice(col_start, col_stop)
+
+
+def _resolve_slice_index(data, axis_ind, slice_value):
+    """Resolve the requested slice value to an index, using nearest if needed."""
+    axis = data.nxaxes[axis_ind + 1]
+    axis_values = np.asarray(axis.nxvalue)
+    try:
+        slice_ind = int(axis.index(slice_value))
+        actual_value = float(axis_values[slice_ind])
+    except Exception:
+        slice_ind = int(np.argmin(np.abs(axis_values - slice_value)))
+        actual_value = float(axis_values[slice_ind])
+        print(f"  Requested slice value {slice_value} not found exactly; "
+              f"using nearest value {actual_value} at index {slice_ind}")
+    return slice_ind, actual_value
+
+
+def _slice_plot_axes(data, axis_ind):
+    """Return x/y axes metadata for a 2D plot extracted from a 3D volume."""
+    if axis_ind == 0:
+        x_axis = data.nxaxes[3]
+        y_axis = data.nxaxes[2]
+    elif axis_ind == 1:
+        x_axis = data.nxaxes[3]
+        y_axis = data.nxaxes[1]
+    elif axis_ind == 2:
+        x_axis = data.nxaxes[2]
+        y_axis = data.nxaxes[1]
+    else:
+        raise ValueError(f"axis_ind must be 0, 1, or 2. Received: {axis_ind}")
+    return x_axis, y_axis
+
+
+def _apply_slice_axes_metadata(ax, data, axis_ind, slice_value, label_size=None):
+    """Apply extent, labels, and tutorial-style title to an image axis."""
+    x_axis, y_axis = _slice_plot_axes(data, axis_ind)
+    ax.get_images()[0].set_extent(
+        (x_axis.nxvalue[0], x_axis.nxvalue[-1], y_axis.nxvalue[0], y_axis.nxvalue[-1])
+    )
+    axis_label = _axis_display_name(data.nxaxes[axis_ind + 1])
+    x_label = _axis_display_name(x_axis)
+    y_label = _axis_display_name(y_axis)
+    label_kwargs = {}
+    if label_size is not None:
+        label_kwargs["size"] = label_size
+    ax.set_xlabel(x_label, **label_kwargs)
+    ax.set_ylabel(y_label, **label_kwargs)
+    ax.set_title(f"{axis_label}={slice_value}", **label_kwargs)
+
+
+def _sync_cluster_model(clusterGMM, cluster_assigns, cluster_means, cluster_covs):
+    """Update a fitted GMM wrapper after externally reordering cluster labels."""
+    clusterGMM.cluster_assignments = np.asarray(cluster_assigns)
+    clusterGMM.means = np.asarray(cluster_means)
+    clusterGMM.covs = np.asarray(cluster_covs)
+    clusterGMM.num_per_cluster = [
+        int(np.sum(clusterGMM.cluster_assignments == k))
+        for k in range(clusterGMM.cluster_num)
+    ]
+    for k in range(clusterGMM.cluster_num):
+        clusterGMM.cluster[k].mean = np.asarray(cluster_means[k])
+        clusterGMM.cluster[k].cov = np.asarray(cluster_covs[k])
+
+
+def _run_direct_gmm(data, threshold, Data_thresh, Data_ind, nc, rescale_text,
+                    device, random_state=None, reorder=False, rescaled_data=None):
+    """Run XTEC-d clustering and optionally reorder cluster labels."""
+    t0 = time.time()
+
+    if rescaled_data is None:
+        Rescaled_data = _rescale(threshold, Data_thresh, rescale_text, device)
+    else:
+        Rescaled_data = rescaled_data
+
+    if torch.is_tensor(Rescaled_data):
+        Data_for_GMM = Rescaled_data.T
+    else:
+        Data_for_GMM = torch.as_tensor(
+            np.asarray(Rescaled_data).T, dtype=torch.float32, device=device
+        )
+
+    gmm_kwargs = {"cov_type": "diag"}
+    if random_state is not None:
+        gmm_kwargs["random_state"] = int(random_state)
+    clusterGMM = GMM(Data_for_GMM, nc, **gmm_kwargs)
+    clusterGMM.RunEM()
+
+    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+    cluster_means = _to_numpy(clusterGMM.means)
+    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
+    Data_thresh_np = _to_numpy(Data_thresh)
+    Data_ind_np = _to_numpy(Data_ind)
+    Rescaled_data_np = _to_numpy(Rescaled_data)
+
+    if reorder:
+        temp_values = data.nxaxes[0].nxvalue
+        cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(cluster_assigns, cluster_assigns,
+                              cluster_means, cluster_covs,
+                              Data_thresh_np, nc, temp_values)
+        _sync_cluster_model(clusterGMM, cluster_assigns, cluster_means, cluster_covs)
+
+    elapsed = time.time() - t0
+    return {
+        "clusterGMM": clusterGMM,
+        "elapsed": elapsed,
+        "cluster_assigns": cluster_assigns,
+        "cluster_means": cluster_means,
+        "cluster_covs": cluster_covs,
+        "Data_thresh_np": Data_thresh_np,
+        "Data_ind_np": Data_ind_np,
+        "Rescaled_data_np": Rescaled_data_np,
+    }
+
+
 def _gmm_parameter_count(n_components, n_features, cov_type="diag"):
     """Return free-parameter count for a Gaussian mixture model."""
     if cov_type == "diag":
@@ -231,6 +388,116 @@ def _save_results(outdir, cluster_assigns, pixel_assigns, Data_ind,
         f.create_dataset("cluster_covariances", data=np.array(cluster_covs))
 
     print(f"  Results saved to {path}")
+
+
+def _save_tutorial_pickle(path, temp_values, data_values, data_ind,
+                          cluster_assigns, cluster_means, cluster_covs):
+    """Save the final tutorial-style pickle bundle."""
+    obj = {
+        "Temp": np.asarray(temp_values),
+        "Data": np.asarray(data_values).transpose(),
+        "Data_ind": np.asarray(data_ind),
+        "cluster_assignments": np.asarray(cluster_assigns),
+        "Num_clusters": int(len(cluster_means)),
+        "cluster_mean": np.asarray(cluster_means),
+        "cluster_var": np.asarray(cluster_covs),
+    }
+    with open(path, "wb") as handle:
+        pickle.dump(obj, handle)
+    print(f"  Tutorial pickle saved to {path}")
+
+
+def _save_figure(path):
+    """Save and close the current Matplotlib figure."""
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close("all")
+    print(f"  Plot saved to {path}")
+
+
+def _save_threshold_plots(data, threshold, outdir, axis_ind, slice_value,
+                          prefix=""):
+    """Save tutorial-style threshold diagnostic plots."""
+    slice_ind, actual_slice_value = _resolve_slice_index(data, axis_ind, slice_value)
+
+    threshold.plot_cutoff((10, 5))
+    _save_figure(os.path.join(outdir, f"{prefix}cutoff.png"))
+
+    threshold.plot_thresholding_2D_slice((8, 8), slice_ind, axis_ind)
+    ax = plt.gca()
+    _apply_slice_axes_metadata(ax, data, axis_ind, actual_slice_value)
+    _save_figure(os.path.join(outdir, f"{prefix}threshold_slice.png"))
+
+    return slice_ind, actual_slice_value
+
+
+def _save_traj_plot(data, clusterGMM, outdir, filename, title_text):
+    """Save a tutorial-style cluster trajectory plot."""
+    temp_values = data.nxaxes[0].nxvalue
+    clusterGMM.Plot_Cluster_Results_traj(temp_values)
+    plt.xlabel("T(K)", size=18)
+    plt.ylabel(r"$\widetilde{I}_q(T)$", size=18)
+    plt.title(title_text)
+    _save_figure(os.path.join(outdir, filename))
+
+
+def _save_qmap_plot(data, threshold, clusterGMM, data_ind, outdir, filename,
+                    axis_ind, slice_ind, slice_value, figsize=(8, 8)):
+    """Save a tutorial-style reciprocal-space cluster map."""
+    clusterGMM.Plot_Cluster_kspace_2D_slice(
+        threshold, figsize, data_ind, slice_ind, axis_ind
+    )
+    ax = plt.gca()
+    _apply_slice_axes_metadata(ax, data, axis_ind, slice_value, label_size=22)
+    _save_figure(os.path.join(outdir, filename))
+
+
+def _save_zoom_plot(data, clusterGMM, outdir, filename, axis_ind, slice_value,
+                    zoom_window):
+    """Save the zoomed-in cluster map used in the tutorial notebooks."""
+    if zoom_window is None:
+        return
+
+    row_slice, col_slice = zoom_window
+    x_axis, y_axis = _slice_plot_axes(data, axis_ind)
+    x_stop = min(col_slice.stop, len(x_axis.nxvalue) - 1)
+    y_stop = min(row_slice.stop, len(y_axis.nxvalue) - 1)
+    x_extent = [x_axis.nxvalue[col_slice.start], x_axis.nxvalue[x_stop]]
+    y_extent = [y_axis.nxvalue[row_slice.start], y_axis.nxvalue[y_stop]]
+
+    plt.figure(figsize=(10, 10))
+    plt.imshow(
+        clusterGMM.plot_image[row_slice, col_slice],
+        origin="lower",
+        cmap=clusterGMM.plot_cmap,
+        norm=clusterGMM.plot_norm,
+        extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
+    )
+    plt.xlabel(_axis_display_name(x_axis), size=22)
+    plt.ylabel(_axis_display_name(y_axis), size=22)
+    axis_label = _axis_display_name(data.nxaxes[axis_ind + 1])
+    plt.title(f"{axis_label}={slice_value}", size=22)
+    _save_figure(os.path.join(outdir, filename))
+
+
+def _save_avg_intensity_plot(temp_values, data_values, cluster_assigns, outdir,
+                             filename):
+    """Save the tutorial-style cluster-averaged raw intensity plot."""
+    color_list = [
+        "red", "blue", "green", "purple", "yellow",
+        "orange", "pink", "black", "grey", "cyan",
+    ]
+
+    plt.figure()
+    nc = int(np.max(cluster_assigns)) + 1 if len(cluster_assigns) else 0
+    for i in range(nc):
+        cluster_mask = cluster_assigns == i
+        yc = np.mean(data_values[:, cluster_mask], axis=1).flatten()
+        plt.plot(temp_values, yc, color=color_list[i], lw=2)
+
+    plt.yscale("linear")
+    plt.xlabel("T")
+    plt.ylabel("I (cluster avged)")
+    _save_figure(os.path.join(outdir, filename))
 
 
 def _plot_qmap(data, Data_ind, pixel_assigns, nc, outdir, prefix=""):
@@ -325,34 +592,28 @@ def run_xtec_d(args):
     masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
     threshold = Threshold_Background(masked, threshold_type=thresh_type,
                                      device=device)
-    Data_thresh = threshold.data_thresholded
-    Data_ind = threshold.ind_thresholded
-
-    Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
-
-    Data_for_GMM = Rescaled_data.T
-    clusterGMM = GMM(Data_for_GMM, nc, cov_type="diag", random_state=0)
-    clusterGMM.RunEM()
-
-    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
-    cluster_means = _to_numpy(clusterGMM.means)
-    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
-
-    Data_thresh_np = _to_numpy(Data_thresh)
-    Data_ind_np = _to_numpy(Data_ind)
+    results = _run_direct_gmm(
+        data,
+        threshold,
+        threshold.data_thresholded,
+        threshold.ind_thresholded,
+        nc,
+        args.rescale,
+        device,
+        random_state=0 if args.random_state is None else args.random_state,
+        reorder=args.reorder_clusters,
+    )
+    cluster_assigns = results["cluster_assigns"]
+    cluster_means = results["cluster_means"]
+    cluster_covs = results["cluster_covs"]
+    Data_thresh_np = results["Data_thresh_np"]
+    Data_ind_np = results["Data_ind_np"]
 
     elapsed = time.time() - t0
     print(f"  Clustering completed in {elapsed:.2f} s")
     print(f"  Cluster sizes: {[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
-
-    # Deterministic cluster ordering (descending low-T intensity)
-    temp_values = data.nxaxes[0].nxvalue
-    cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
-        _reorder_clusters(cluster_assigns, cluster_assigns,
-                          cluster_means, cluster_covs,
-                          Data_thresh_np, nc, temp_values)
-    print(f"  Reordered cluster sizes: "
-          f"{[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
+    if args.reorder_clusters:
+        print("  Cluster ordering: deterministic low-temperature intensity ordering")
 
     _save_results(args.output, cluster_assigns, cluster_assigns, Data_ind_np,
                   Data_thresh_np, cluster_means, cluster_covs)
@@ -361,6 +622,200 @@ def run_xtec_d(args):
                        args.output)
     _plot_avg_intensities(data, Data_thresh_np, cluster_assigns, nc,
                           args.output)
+
+
+def run_tutorial_d(args):
+    """Tutorial-faithful XTEC-d workflow mirroring the reference notebooks."""
+    data = _load_data(args.input, args.entry, args.slices)
+    device = _get_device(args.device)
+    first_nc = args.first_pass_clusters
+
+    print(f"[Tutorial XTEC-d] first-pass clusters={first_nc} | "
+          f"second-pass clusters={args.second_pass_clusters} | "
+          f"threshold={args.threshold} | rescale={args.rescale} | device={device}")
+
+    os.makedirs(args.output, exist_ok=True)
+    thresh_type = "KL" if args.threshold else "No threshold"
+    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
+    threshold = Threshold_Background(masked, threshold_type=thresh_type,
+                                     device=device)
+
+    slice_ind, actual_slice_value = _save_threshold_plots(
+        data, threshold, args.output, args.slice_axis, args.slice_value
+    )
+    zoom_window = _parse_zoom_window(args.zoom_window)
+
+    first_pass = _run_direct_gmm(
+        data,
+        threshold,
+        threshold.data_thresholded,
+        threshold.ind_thresholded,
+        first_nc,
+        args.rescale,
+        device,
+        random_state=args.random_state,
+        reorder=args.reorder_clusters,
+    )
+
+    clusterGMM_1 = first_pass["clusterGMM"]
+    cluster_assigns_1 = first_pass["cluster_assigns"]
+    cluster_means_1 = first_pass["cluster_means"]
+    cluster_covs_1 = first_pass["cluster_covs"]
+    Data_thresh_np = first_pass["Data_thresh_np"]
+    Data_ind_np = first_pass["Data_ind_np"]
+    Rescaled_data_np = first_pass["Rescaled_data_np"]
+
+    print(f"  First-pass cluster sizes: "
+          f"{[int(np.sum(cluster_assigns_1 == k)) for k in range(first_nc)]}")
+
+    _save_results(
+        args.output,
+        cluster_assigns_1,
+        cluster_assigns_1,
+        Data_ind_np,
+        Data_thresh_np,
+        cluster_means_1,
+        cluster_covs_1,
+        prefix="pass1_",
+    )
+    _save_traj_plot(
+        data,
+        clusterGMM_1,
+        args.output,
+        "trajectories_pass1.png",
+        "Cluster mean and variance \n (rescaled) intensity trajectory ",
+    )
+    _save_qmap_plot(
+        data,
+        threshold,
+        clusterGMM_1,
+        Data_ind_np,
+        args.output,
+        "qmap_pass1.png",
+        args.slice_axis,
+        slice_ind,
+        actual_slice_value,
+    )
+    _save_zoom_plot(
+        data,
+        clusterGMM_1,
+        args.output,
+        "qmap_zoom_pass1.png",
+        args.slice_axis,
+        actual_slice_value,
+        zoom_window,
+    )
+
+    if args.good_cluster is not None:
+        good_mask = cluster_assigns_1 == args.good_cluster
+        print(f"  Retaining user-selected first-pass cluster {args.good_cluster} "
+              f"for the second pass")
+    elif args.bad_clusters:
+        bad_clusters = set(_parse_int_list(args.bad_clusters))
+        good_mask = ~np.isin(cluster_assigns_1, sorted(bad_clusters))
+        print(f"  Removing first-pass clusters {sorted(bad_clusters)} "
+              f"for the second pass")
+    else:
+        std_scores = np.array([
+            0.0 if np.sum(cluster_assigns_1 == k) < 2 else np.std(cluster_means_1[k])
+            for k in range(first_nc)
+        ])
+        discovery_cluster = int(np.argmax(std_scores))
+        good_mask = cluster_assigns_1 == discovery_cluster
+        print(f"  Auto-selected discovery cluster {discovery_cluster} "
+              f"for the second pass")
+
+    if not np.any(good_mask):
+        raise RuntimeError("Second-pass selection is empty. Adjust --good-cluster "
+                           "or --bad-clusters.")
+
+    Good_data = Data_thresh_np[:, good_mask]
+    Good_rescaled_data = Rescaled_data_np[:, good_mask]
+    Good_ind = Data_ind_np[good_mask]
+
+    second_pass = _run_direct_gmm(
+        data,
+        threshold,
+        Good_data,
+        Good_ind,
+        args.second_pass_clusters,
+        args.rescale,
+        device,
+        random_state=args.random_state,
+        reorder=args.reorder_clusters,
+        rescaled_data=Good_rescaled_data,
+    )
+
+    clusterGMM_2 = second_pass["clusterGMM"]
+    cluster_assigns_2 = second_pass["cluster_assigns"]
+    cluster_means_2 = second_pass["cluster_means"]
+    cluster_covs_2 = second_pass["cluster_covs"]
+
+    print(f"  Second-pass cluster sizes: "
+          f"{[int(np.sum(cluster_assigns_2 == k)) for k in range(args.second_pass_clusters)]}")
+
+    _save_results(
+        args.output,
+        cluster_assigns_2,
+        cluster_assigns_2,
+        Good_ind,
+        Good_data,
+        cluster_means_2,
+        cluster_covs_2,
+        prefix="pass2_",
+    )
+    _save_traj_plot(
+        data,
+        clusterGMM_2,
+        args.output,
+        "trajectories_pass2.png",
+        " ",
+    )
+    _save_qmap_plot(
+        data,
+        threshold,
+        clusterGMM_2,
+        Good_ind,
+        args.output,
+        "qmap_pass2.png",
+        args.slice_axis,
+        slice_ind,
+        actual_slice_value,
+    )
+    _save_zoom_plot(
+        data,
+        clusterGMM_2,
+        args.output,
+        "qmap_zoom_pass2.png",
+        args.slice_axis,
+        actual_slice_value,
+        zoom_window,
+    )
+    _save_avg_intensity_plot(
+        data.nxaxes[0].nxvalue,
+        Good_data,
+        cluster_assigns_2,
+        args.output,
+        "avg_intensities_pass2.png",
+    )
+
+    pickle_name = args.pickle_name
+    if pickle_name is None:
+        axis_label = _axis_display_name(data.nxaxes[args.slice_axis + 1]).lower()
+        if axis_label == "l" and abs(actual_slice_value) < 1e-12:
+            pickle_name = "csrs_0x0_clustering.p"
+        else:
+            pickle_name = "tutorial_d_final_clustering.p"
+
+    _save_tutorial_pickle(
+        os.path.join(args.output, pickle_name),
+        data.nxaxes[0].nxvalue,
+        Good_data,
+        Good_ind,
+        cluster_assigns_2,
+        cluster_means_2,
+        cluster_covs_2,
+    )
 
 
 def run_xtec_s(args):
@@ -743,7 +1198,52 @@ def build_parser():
     _add_common(sp_d)
     sp_d.add_argument("-n", "--n-clusters", type=int, default=4,
                       help="Number of clusters (default: 4)")
+    sp_d.add_argument("--random-state", type=int, default=None,
+                      help="Random seed for GMM initialization "
+                           "(default: 0 for xtec-d)")
+    sp_d.add_argument("--reorder-clusters", dest="reorder_clusters",
+                      action="store_true", default=True,
+                      help="Reorder clusters by descending low-temperature "
+                           "raw intensity (default: on)")
+    sp_d.add_argument("--no-reorder-clusters", dest="reorder_clusters",
+                      action="store_false",
+                      help="Keep the native GMM cluster ordering")
     sp_d.set_defaults(func=run_xtec_d)
+
+    # -- tutorial-d -------------------------------------------------------
+    sp_td = subparsers.add_parser(
+        "tutorial-d",
+        help="Tutorial-faithful XTEC-d workflow with threshold plots and a second clustering pass",
+    )
+    _add_common(sp_td)
+    sp_td.add_argument("--first-pass-clusters", type=int, default=4,
+                       help="Number of clusters for the first pass (default: 4)")
+    sp_td.add_argument("--second-pass-clusters", type=int, default=3,
+                       help="Number of clusters for the second pass (default: 3)")
+    sp_td.add_argument("--good-cluster", type=int, default=None,
+                       help="Retain only this first-pass cluster for the second pass")
+    sp_td.add_argument("--bad-clusters", default=None,
+                       help="Comma-separated first-pass clusters to drop before "
+                            "the second pass, e.g. '0,1,3'")
+    sp_td.add_argument("--slice-axis", type=int, choices=[0, 1, 2], default=0,
+                       help="Orthogonal axis for the tutorial slice plot: "
+                            "0=L, 1=K, 2=H (default: 0)")
+    sp_td.add_argument("--slice-value", type=float, default=0.0,
+                       help="Axis value for the tutorial slice plot "
+                            "(default: 0.0)")
+    sp_td.add_argument("--zoom-window", default="200:300,0:100",
+                       help="Zoom window for q-map images in the form "
+                            "'row0:row1,col0:col1' (default: 200:300,0:100)")
+    sp_td.add_argument("--random-state", type=int, default=None,
+                       help="Random seed for GMM initialization "
+                            "(default: None, matching the tutorial notebooks)")
+    sp_td.add_argument("--reorder-clusters", dest="reorder_clusters",
+                       action="store_true", default=False,
+                       help="Reorder clusters by descending low-temperature "
+                            "raw intensity")
+    sp_td.add_argument("--pickle-name", default=None,
+                       help="Optional filename for the final tutorial pickle")
+    sp_td.set_defaults(func=run_tutorial_d)
 
     # -- xtec-s -----------------------------------------------------------
     sp_s = subparsers.add_parser(
