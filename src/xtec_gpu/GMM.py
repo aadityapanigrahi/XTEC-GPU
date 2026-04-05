@@ -446,7 +446,8 @@ class GMM(object):
         km = km_cls(
             n_clusters=cluster_num,
             random_state=random_state,
-            n_init=10,
+            # Match sklearn's k-means++ "auto" behavior (single run).
+            n_init=1,
             max_iter=300,
             tol=1e-4,
         )
