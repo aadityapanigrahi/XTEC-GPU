@@ -396,6 +396,8 @@ def _save_results(outdir, cluster_assigns, pixel_assigns, Data_ind,
         f.create_dataset("cluster_assignments", data=cluster_assigns)
         f.create_dataset("pixel_assignments", data=pixel_assigns)
         f.create_dataset("data_indices", data=Data_ind)
+        # Persist thresholded input used for clustering to support manual oversight.
+        f.create_dataset("data_thresholded", data=Data_thresh)
         f.create_dataset("cluster_means", data=cluster_means)
         f.create_dataset("cluster_covariances", data=np.array(cluster_covs))
 
@@ -872,7 +874,19 @@ def run_xtec_s(args):
     Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
 
     Data_for_GMM = Rescaled_data.T
-    clusterGMM = GMM(Data_for_GMM, nc)
+    gmm_kwargs = {
+        "cov_type": "diag",
+        "solver_mode": args.solver_mode,
+        "init_strategy_mode": args.init_strategy_mode,
+        "post_stepwise_epochs": int(args.post_stepwise_epochs),
+        "post_stepwise_tol": args.post_stepwise_tol,
+        "batch_num": int(args.batch_num),
+        "max_batch_epoch": int(args.max_batch_epoch),
+        "max_full_epoch": int(args.max_full_epoch),
+    }
+    if args.random_state is not None:
+        gmm_kwargs["random_state"] = int(args.random_state)
+    clusterGMM = GMM(Data_for_GMM, nc, **gmm_kwargs)
     clusterGMM.RunEM()
     clusterGMM.Get_pixel_labels(Peak_avg)
 
@@ -887,14 +901,15 @@ def run_xtec_s(args):
     print(f"\n  Clustering completed in {elapsed:.2f} s")
     print(f"  Cluster sizes: {clusterGMM.num_per_cluster}")
 
-    # Deterministic cluster ordering (descending low-T intensity)
-    temp_values = data.nxaxes[0].nxvalue
-    cluster_assigns, pixel_assigns, cluster_means, cluster_covs = \
-        _reorder_clusters(cluster_assigns, pixel_assigns,
-                          cluster_means, cluster_covs,
-                          Data_thresh_np, nc, temp_values)
-    print(f"  Reordered cluster sizes: "
-          f"{[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
+    if args.reorder_clusters:
+        # Deterministic cluster ordering (descending low-T intensity)
+        temp_values = data.nxaxes[0].nxvalue
+        cluster_assigns, pixel_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(cluster_assigns, pixel_assigns,
+                              cluster_means, cluster_covs,
+                              Data_thresh_np, nc, temp_values)
+        print(f"  Reordered cluster sizes: "
+              f"{[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
 
     _save_results(args.output, cluster_assigns, pixel_assigns, Data_ind_np,
                   Data_thresh_np, cluster_means, cluster_covs)
@@ -1229,7 +1244,7 @@ def build_parser():
                              reorder_default=False,
                              random_state_help_suffix="",
                              solver_mode_default="torchgmm",
-                             init_strategy_default="kmeans++",
+                             init_strategy_default="sklearn-kmeans",
                              post_stepwise_epochs_default=0):
         sp.add_argument("--random-state", type=int, default=random_state_default,
                         help="Random seed for GMM initialization "
@@ -1278,7 +1293,7 @@ def build_parser():
                          reorder_default=True,
                          random_state_help_suffix="0 for xtec-d",
                          solver_mode_default="torchgmm",
-                         init_strategy_default="kmeans++",
+                         init_strategy_default="sklearn-kmeans",
                          post_stepwise_epochs_default=0)
     sp_d.set_defaults(func=run_xtec_d)
 
@@ -1322,6 +1337,12 @@ def build_parser():
     _add_common(sp_s)
     sp_s.add_argument("-n", "--n-clusters", type=int, default=4,
                       help="Number of clusters (default: 4)")
+    _add_gmm_parity_args(sp_s, random_state_default=None,
+                         reorder_default=True,
+                         random_state_help_suffix="None for xtec-s",
+                         solver_mode_default="torchgmm",
+                         init_strategy_default="sklearn-kmeans",
+                         post_stepwise_epochs_default=0)
     sp_s.set_defaults(func=run_xtec_s)
 
     # -- label-smooth -----------------------------------------------------

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "xtec-workflow": {
+      "command": "python",
+      "args": [
+        "/data/XTEC_GPU/XTEC-GPU-Baseline/scripts/xtec_workflow_mcp.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/data/XTEC_GPU/XTEC-GPU-Baseline/src"
+      }
+    }
+  }
+}
+
