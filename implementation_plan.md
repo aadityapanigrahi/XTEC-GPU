@@ -136,7 +136,7 @@ Commit:
 - [x] Plan file created.
 - [x] Phase 0 complete.
 - [x] Phase 1 complete.
-- [ ] Phase 2 complete.
+- [x] Phase 2 complete.
 - [ ] Phase 3 complete.
 - [ ] Phase 4 complete (optional).
 
@@ -156,6 +156,17 @@ Phase 1 artifacts:
   - BIC parity: pass
   - Final `results.h5` parity: pass
   - Wall time: `125.14s -> 31.16s` (`4.02x` speedup on this benchmark)
+
+Phase 2 artifacts:
+
+- Run root: `/tmp/agentic_phase2_cuda_medium`
+- Timing JSON: `/tmp/agentic_phase2_cuda_medium/timing_breakdown.json`
+- Parity JSON vs Phase 1: `/tmp/agentic_phase2_cuda_medium/parity_vs_phase1.json`
+- Result summary:
+  - Recommendation parity: pass
+  - BIC parity: pass
+  - Final `results.h5` parity: pass
+  - Wall time: `31.16s -> 30.24s` (`1.03x` incremental speedup)
 
 ## Resume Instructions
 

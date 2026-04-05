@@ -170,6 +170,32 @@ def _get_or_load_data(args, entry_path, slices):
     return runtime_cache[key]
 
 
+def _build_threshold(data, threshold_enabled: bool, device):
+    """Construct masking+threshold object using existing preprocessing behavior."""
+    thresh_type = "KL" if threshold_enabled else "No threshold"
+    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
+    return Threshold_Background(masked, threshold_type=thresh_type, device=device)
+
+
+def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
+    """Reuse d-mode threshold preprocessing when a shared runtime cache is present."""
+    runtime_cache = _runtime_cache_from_args(args)
+    if runtime_cache is None:
+        return _build_threshold(data, bool(common_cfg.threshold), device)
+
+    key = (
+        "threshold_d",
+        args.input,
+        common_cfg.entry,
+        common_cfg.slices,
+        bool(common_cfg.threshold),
+        str(device),
+    )
+    if key not in runtime_cache:
+        runtime_cache[key] = _build_threshold(data, bool(common_cfg.threshold), device)
+    return runtime_cache[key]
+
+
 def _rescale(threshold, Data_thresh, rescale_text, device):
     """Apply rescaling; returns a torch tensor."""
     if rescale_text == "mean":
@@ -642,10 +668,7 @@ def run_xtec_d(args):
           f"rescale={common_cfg.rescale} | device={device}")
 
     t0 = time.time()
-    thresh_type = "KL" if common_cfg.threshold else "No threshold"
-    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
-    threshold = Threshold_Background(masked, threshold_type=thresh_type,
-                                     device=device)
+    threshold = _get_or_build_threshold_d(args, data, common_cfg, device)
     results = _run_direct_gmm(
         data,
         threshold,
@@ -1058,10 +1081,7 @@ def run_bic_d(args):
     print(f"[BIC XTEC-d] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
 
-    thresh_type = "KL" if common_cfg.threshold else "No threshold"
-    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
-    threshold = Threshold_Background(masked, threshold_type=thresh_type,
-                                     device=device)
+    threshold = _get_or_build_threshold_d(args, data, common_cfg, device)
     Data_thresh = threshold.data_thresholded
 
     Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
