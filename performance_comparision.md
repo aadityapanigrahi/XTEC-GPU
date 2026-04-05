@@ -4,56 +4,85 @@ Date: 2026-04-05
 
 ## Benchmark Setup
 
-- Input: `/data/XTEC_GPU/test_dataset/srn0_XTEC.nxs`
-- Slice (largest feasible in current workflow path): `:,0.0:1.0,-30.0:30.0,-30.0:30.0`
-- Loaded shape: `(24, 21, 1201, 1201)`
+- Source input: `/data/XTEC_GPU/test_dataset/srn0_XTEC.nxs`
+- Benchmark input (derived ~20GB working set): `/data/XTEC_GPU/test_dataset/srn0_XTEC_20gb_24x72x1201x1201.nxs`
+- Runtime slicing: `none` (unsliced input for both runs)
+- Loaded shape: `(24, 72, 1201, 1201)`
 - Workflow config:
-  - `candidate_modes=d,s`
+  - `candidate_modes=d`
   - `min_nc=2`, `max_nc=4`
   - `execution_backend=inprocess`
   - sweep artifacts enabled
   - final run enabled
 - CPU run: `--device cpu`
-- GPU run: `--device cuda:1`
-- Python: `/home/ap2563/miniconda3/envs/torchgpu/bin/python`
+- GPU run: `--device cuda:1 --streamed-preprocess --streamed-exact-log-limit 50000000`
+- Python: `/data/XTEC_GPU/XTEC-GPU/.venv/bin/python3`
 
 ## Apples-to-Apples Timing Results
 
 | Metric | CPU (s) | CUDA (s) | CPU/CUDA |
 |---|---:|---:|---:|
-| Workflow wall time | 897.000 | 531.743 | 1.687x |
-| Data load total | 531.376 | 485.998 | 1.093x |
-| Preprocess mask zeros | 72.944 | 19.996 | 3.648x |
-| Preprocess threshold | 183.079 | 1.852 | 98.862x |
-| Preprocess peak averaging | 3.629 | 10.992 | 0.330x |
-| Preprocess rescale | 0.708 | 0.002 | 332.371x |
-| Preprocess total | 260.360 | 32.843 | 7.927x |
-| GMM RunEM total | 92.428 | 2.296 | 40.254x |
-| I/O total | 6.881 | 6.714 | 1.025x |
-| xtec_d command total | 382.081 | 222.157 | 1.720x |
-| xtec_s command total | 267.709 | 158.883 | 1.685x |
-| bic_d command total | 139.566 | 74.266 | 1.879x |
-| bic_s command total | 107.638 | 76.431 | 1.408x |
+| Workflow wall time | 366.001 | 408.002 | 0.897x |
+| Data load total (instrumented) | 0.005 | 0.013 | 0.341x |
+| Preprocess mask zeros (instrumented) | 32.756 | 0.000 | N/A |
+| Preprocess threshold (instrumented) | 103.086 | 0.000 | N/A |
+| Preprocess peak averaging (instrumented) | 0.000 | 0.000 | N/A |
+| Preprocess rescale (instrumented) | 3.058 | 0.050 | 61.687x |
+| Preprocess total (instrumented) | 138.900 | 0.050 | 2801.518x |
+| GMM RunEM total | 197.522 | 2.360 | 83.685x |
+| I/O total | 6.548 | 18.338 | 0.357x |
+| bic_d command total | 228.682 | 386.794 | 0.591x |
+| xtec_d command total | 137.238 | 21.204 | 6.472x |
 
 ## Observed Bottleneck Shares
 
 - CPU:
-  - Load: `59.24%`
-  - Preprocess: `29.03%`
-  - RunEM: `10.30%`
-  - I/O: `0.77%`
+  - Load: `0.00%`
+  - Preprocess: `37.95%`
+  - RunEM: `53.97%`
+  - I/O: `1.79%`
 - CUDA:
-  - Load: `91.40%`
-  - Preprocess: `6.18%`
-  - RunEM: `0.43%`
-  - I/O: `1.26%`
+  - Load: `0.00%`
+  - Preprocess: `0.01%`
+  - RunEM: `0.58%`
+  - I/O: `4.49%`
 
 ## Consistency Check
 
 - CPU recommendation: `{"mode": "d", "n_clusters": 3, "init_strategy_mode": "kmeans++"}`
 - CUDA recommendation: `{"mode": "d", "n_clusters": 3, "init_strategy_mode": "kmeans++"}`
+- Recommendation equal: `True`
+- BIC n-cluster grid equal: `True`
+- BIC score max abs diff: `208.0`
+- BIC score mean abs diff: `114.0`
+- Final cluster assignment match ratio (raw order): `0.566454`
+- Final cluster means MAE: `1.128376e-03`
+- Final cluster covariances MAE: `9.301571e-04`
+- Thresholded index set equal (aligned): `True`
+- Final cluster assignment match ratio (aligned by `data_indices`): `0.999453`
+- Final ARI (aligned by `data_indices`): `0.998920`
+
+## Threshold Parity (CPU Standard vs GPU Streaming Exact)
+
+- `cutoff_abs_diff`: `4.441e-16`
+- `n_thresholded_diff`: `0`
+- thresholded voxel set parity: `true`
+- streamed cutoff mode: `exact-kl`
+- cutoff compute device: `cuda:1`
+- CPU cutoff: `2.529293105740551`
+- GPU streamed cutoff: `2.529293105740550`
+- Streaming chunks: `25` (`chunks_per_axis=[1, 5, 5]`, `chunk_shape=[72, 279, 278]`)
+- Estimated chunk bytes: `1072217088` (~1.00 GiB)
+- Valid log means used for cutoff: `40793977`
 
 ## Raw Timing Artifacts
 
-- CPU JSON: `/tmp/wf_timing_maxslice_cpu/timing_breakdown.json`
-- CUDA JSON: `/tmp/wf_timing_maxslice_cuda/timing_breakdown.json`
+- CPU JSON: `/tmp/wf_cmp20gb_cpu_std_d_20260405/timing_breakdown.json`
+- CUDA JSON: `/tmp/wf_cmp20gb_gpu_stream_d_20260405/timing_breakdown.json`
+- Workflow parity JSON: `/tmp/wf_cmp20gb_gpu_stream_d_20260405/parity_vs_cpu.json`
+- Threshold parity JSON: `/tmp/wf_cmp20gb_gpu_stream_d_20260405/threshold_parity_vs_cpu.json`
+
+## Notes
+
+- The streamed preprocessing path bypasses several function hooks used by the profiler (`Mask_Zeros`, `Threshold_Background`, `Peak_averaging`), so those instrumented rows read near-zero for CUDA and should not be interpreted as literal total preprocessing cost.
+- For strict CPU-standard vs GPU-streaming parity on this ~20GB working set, `candidate_modes=d` was used. The `s` path is currently non-streamed and can exceed GPU memory at this scale.
