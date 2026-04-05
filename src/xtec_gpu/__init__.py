@@ -12,11 +12,6 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import logging
 import warnings
 
-try:
-    import pytorch_lightning
-except ImportError:
-    pass
-
 class _LightningQuietFilter(logging.Filter):
     def filter(self, record):
         msg = record.getMessage()

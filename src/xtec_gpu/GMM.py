@@ -72,10 +72,15 @@ API overview
 """
 
 import numpy as np
+try:
+    from cuml.cluster import KMeans as CuMLKMeans
+except Exception:
+    CuMLKMeans = None
 from torchgmm.bayes import GaussianMixture
 import torch
 import matplotlib.pyplot as plt
 from matplotlib import colors
+from sklearn.cluster import KMeans
 
 
 class GMM(object):
@@ -137,6 +142,13 @@ class GMM(object):
         verbose_interval=10,
         color_list=None,
         trainer_params=None,
+        solver_mode="torchgmm",
+        init_strategy_mode="kmeans++",
+        post_stepwise_epochs=0,
+        post_stepwise_tol=None,
+        batch_num=1,
+        max_batch_epoch=50,
+        max_full_epoch=500,
     ):
         """
         Initialize GMM parameters and underlying torchgmm model.
@@ -170,6 +182,32 @@ class GMM(object):
             Colors used in plotting routines.
         trainer_params : dict, optional
             Extra parameters forwarded to torchgmm's trainer (if applicable).
+        solver_mode : {"torchgmm", "legacy-stepwise"}, default="torchgmm"
+            Fitting backend. ``"torchgmm"`` keeps the existing fast path.
+            ``"legacy-stepwise"`` runs a GPU-native port of the original XTEC
+            stepwise EM updates for closer CPU parity.
+        init_strategy_mode : {"kmeans++", "xtec", "sklearn-kmeans", "cuml-kmeans"}, default="kmeans++"
+            Mean initialization used before fitting. ``"kmeans++"`` favors
+            stability and speed. ``"xtec"`` mimics the original CPU repo by
+            drawing each initial mean from a Gaussian with the dataset mean and
+            covariance. ``"sklearn-kmeans"`` reproduces the original Yanjun GPU
+            tutorial path by running scikit-learn KMeans once to obtain stable
+            initial means for torchgmm. ``"cuml-kmeans"`` runs RAPIDS cuML
+            KMeans on GPU to avoid CPU round-trips.
+        post_stepwise_epochs : int, default=0
+            Number of GPU-native full-data stepwise EM refinement iterations to
+            run after the initial torchgmm fit. This moves the solution closer
+            to the original CPU implementation without introducing CPU
+            bottlenecks.
+        post_stepwise_tol : float or None, optional
+            Convergence tolerance for the post-fit stepwise refinement loop.
+            Defaults to ``self.tol``.
+        batch_num : int, default=1
+            Number of mini-batches for the legacy stepwise EM mode.
+        max_batch_epoch : int, default=50
+            Maximum batch-phase epochs for the legacy stepwise EM mode.
+        max_full_epoch : int, default=500
+            Maximum full-data epochs for the legacy stepwise EM mode.
         """
         self.color_list = (
             color_list
@@ -193,50 +231,94 @@ class GMM(object):
         self.random_state = random_state
         self.alpha = alpha
         self.epoch = 0
+        self.solver_mode = solver_mode
+        self.init_strategy_mode = init_strategy_mode
+        self.post_stepwise_epochs = int(post_stepwise_epochs)
+        self.post_stepwise_tol = post_stepwise_tol
+        self.batch_num = int(max(1, batch_num))
+        self.max_batch_epoch = int(max_batch_epoch)
+        self.max_full_epoch = int(max_full_epoch)
 
         if torch.is_tensor(self.data):
             self.data = self.data.to(self.device)
         else:
             self.data = torch.as_tensor(self.data, dtype=torch.float32, device=self.device)
 
-        # Torch-native KMeans++ initialization for stable EM starts.
-        init_means = self._init_means_kmeanspp(
-            self.data, cluster_num=cluster_num, random_state=random_state
+        if self.init_strategy_mode == "kmeans++":
+            init_means = self._init_means_kmeanspp(
+                self.data, cluster_num=cluster_num, random_state=random_state
+            )
+        elif self.init_strategy_mode == "xtec":
+            init_means = self._init_means_xtec(
+                self.data, cluster_num=cluster_num, random_state=random_state
+            )
+        elif self.init_strategy_mode == "sklearn-kmeans":
+            init_means = self._init_means_sklearn_kmeans(
+                self.data, cluster_num=cluster_num, random_state=random_state
+            )
+        elif self.init_strategy_mode == "cuml-kmeans":
+            init_means = self._init_means_cuml_kmeans(
+                self.data, cluster_num=cluster_num, random_state=random_state
+            )
+        else:
+            raise ValueError(
+                "init_strategy_mode must be 'kmeans++', 'xtec', 'sklearn-kmeans', or 'cuml-kmeans'. "
+                f"Received: {init_strategy_mode!r}"
+            )
+
+        self.mixing_weights = torch.full(
+            (self.cluster_num,),
+            1.0 / self.cluster_num,
+            dtype=self.data.dtype,
+            device=self.device,
         )
+        var_init = self.data.var(dim=0, unbiased=False).clamp(min=1e-12)
+        if self.cov_type == "diag":
+            self.covs = var_init.unsqueeze(0).repeat(self.cluster_num, 1).clone()
+        else:
+            eye = torch.eye(self.data.shape[1], dtype=self.data.dtype, device=self.device)
+            self.covs = torch.stack([
+                torch.diag(var_init) + reg_covar * eye for _ in range(self.cluster_num)
+            ], dim=0)
+        self.means = init_means.clone()
+        self.cluster_probs = None
 
-        # Determine PyTorch Lightning trainer parameters based on device
-        accelerator = "auto"
-        devices = 1
-
-        if self.device.type == "cpu":
-            accelerator = "cpu"
-            devices = "auto"
-        elif self.device.type == "cuda":
-            accelerator = "gpu"
-            # If a specific GPU index was requested (e.g. cuda:1), use list format [1].
-            # Otherwise, use 1 to grab the first available GPU (preventing DDP crashes).
-            devices = [self.device.index] if self.device.index is not None else 1
-        elif self.device.type == "mps":
-            accelerator = "mps"
+        self.GaussianMixture = None
+        if self.solver_mode == "torchgmm":
+            accelerator = "auto"
             devices = 1
 
-        # Build torchgmm model
-        self.GaussianMixture = GaussianMixture(
-            num_components=cluster_num,
-            covariance_type=cov_type,
-            convergence_tolerance=tol,
-            covariance_regularization=reg_covar,
-            init_strategy=init_params,
-            init_means=init_means,
-            trainer_params={
-                "max_epochs": max_iter, 
-                "accelerator": accelerator, 
-                "devices": devices, 
-                "enable_progress_bar": True,
-                "enable_model_summary": False,
-                **(trainer_params or {})
-            }
-        )
+            if self.device.type == "cpu":
+                accelerator = "cpu"
+                devices = "auto"
+            elif self.device.type == "cuda":
+                accelerator = "gpu"
+                devices = [self.device.index] if self.device.index is not None else 1
+            elif self.device.type == "mps":
+                accelerator = "mps"
+                devices = 1
+
+            self.GaussianMixture = GaussianMixture(
+                num_components=cluster_num,
+                covariance_type=cov_type,
+                convergence_tolerance=tol,
+                covariance_regularization=reg_covar,
+                init_strategy=init_params,
+                init_means=init_means,
+                trainer_params={
+                    "max_epochs": max_iter,
+                    "accelerator": accelerator,
+                    "devices": devices,
+                    "enable_progress_bar": True,
+                    "enable_model_summary": False,
+                    **(trainer_params or {})
+                }
+            )
+        elif self.solver_mode != "legacy-stepwise":
+            raise ValueError(
+                "solver_mode must be 'torchgmm' or 'legacy-stepwise'. "
+                f"Received: {solver_mode!r}"
+            )
 
     @staticmethod
     def _init_means_kmeanspp(data, cluster_num, random_state=None):
@@ -270,7 +352,16 @@ class GMM(object):
             total = torch.sum(dist_sq)
             if float(total.item()) <= 0.0:
                 # Degenerate case (e.g., identical points): fallback to random.
-                next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
+                # When K <= N, enforce unique picks to avoid duplicate centers.
+                if n_samples >= cluster_num:
+                    remaining = torch.nonzero(~chosen_mask, as_tuple=False).flatten()
+                    if remaining.numel() == 0:
+                        next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
+                    else:
+                        pick = int(torch.randint(0, int(remaining.numel()), (1,), generator=generator).item())
+                        next_idx = int(remaining[pick].item())
+                else:
+                    next_idx = int(torch.randint(0, n_samples, (1,), generator=generator).item())
             else:
                 probs_cpu = (dist_sq / total).detach().cpu()
                 next_idx = int(torch.multinomial(probs_cpu, 1, generator=generator).item())
@@ -284,6 +375,89 @@ class GMM(object):
 
         idx = torch.as_tensor(chosen, dtype=torch.long, device=data.device)
         return data[idx].clone()
+
+    @staticmethod
+    def _init_means_xtec(data, cluster_num, random_state=None):
+        """Mimic the original CPU XTEC initialization on the active device."""
+        if data.shape[0] == 0:
+            raise ValueError("Cannot initialize GMM means from empty data.")
+
+        generator = torch.Generator(device=data.device if data.device.type != "cpu" else "cpu")
+        if random_state is not None:
+            generator.manual_seed(int(random_state))
+
+        mean_init = data.mean(dim=0)
+        var_init = data.var(dim=0, unbiased=False).clamp(min=1e-12)
+        std_init = torch.sqrt(var_init)
+        noise = torch.randn(
+            (cluster_num, data.shape[1]),
+            generator=generator,
+            device=data.device,
+            dtype=data.dtype,
+        )
+        return mean_init.unsqueeze(0) + noise * std_init.unsqueeze(0)
+
+    @staticmethod
+    def _init_means_sklearn_kmeans(data, cluster_num, random_state=None):
+        """Reproduce the original Yanjun GPU tutorial initialization."""
+        if data.shape[0] == 0:
+            raise ValueError("Cannot initialize GMM means from empty data.")
+
+        km = KMeans(
+            n_clusters=cluster_num,
+            n_init="auto",
+            random_state=random_state,
+        )
+        km.fit(data.detach().cpu().numpy())
+        return torch.as_tensor(
+            km.cluster_centers_,
+            dtype=data.dtype,
+            device=data.device,
+        )
+
+    @staticmethod
+    def _init_means_cuml_kmeans(data, cluster_num, random_state=None):
+        """GPU-native KMeans initialization using RAPIDS cuML."""
+        if data.shape[0] == 0:
+            raise ValueError("Cannot initialize GMM means from empty data.")
+        km_cls = CuMLKMeans
+        if km_cls is None:
+            # Retry import at call time so runtime library-path setup can take effect.
+            try:
+                from cuml.cluster import KMeans as km_cls
+            except Exception as exc:
+                raise ImportError(
+                    "init_strategy_mode='cuml-kmeans' requires RAPIDS cuML "
+                    "(e.g., `pip install cuml-cu12`). "
+                    f"Underlying import error: {exc}"
+                ) from exc
+        if data.device.type != "cuda":
+            raise ValueError(
+                "init_strategy_mode='cuml-kmeans' requires CUDA tensors/device."
+            )
+        try:
+            import cupy as cp
+        except Exception as exc:
+            raise ImportError(
+                "init_strategy_mode='cuml-kmeans' requires CuPy "
+                "(normally installed with RAPIDS cuML)."
+            ) from exc
+
+        km = km_cls(
+            n_clusters=cluster_num,
+            random_state=random_state,
+            # Match sklearn's k-means++ "auto" behavior (single run).
+            n_init=1,
+            max_iter=300,
+            tol=1e-4,
+        )
+
+        # Use DLPack to keep tensor transfers on GPU without CPU round-trips.
+        data_cupy = cp.from_dlpack(data.contiguous())
+        km.fit(data_cupy)
+        centers_cupy = km.cluster_centers_
+        centers_torch = torch.from_dlpack(centers_cupy)
+        return centers_torch.to(dtype=data.dtype, device=data.device)
 
     def RunEM(self, label_smoothing_flag=False, Markov_matrix=None,
               smoothing_iterations=1, max_smooth_epoch=500, tol=None):
@@ -325,25 +499,28 @@ class GMM(object):
         else:
             X = X.to(self.device)
 
-        # ---- Standard EM via torchgmm (warm start) --------------------------
-        self.GaussianMixture.fit(X)
+        if self.solver_mode == "torchgmm":
+            self.GaussianMixture.fit(X)
 
-        # Extract initial parameters as torch tensors on device
-        self.means = self.GaussianMixture.model_.means.detach().clone().to(self.device)  # (K, T)
-        self.covs = self.GaussianMixture.model_.covariances.detach().clone().to(self.device)  # (K, T) or (K,T,T)
+            self.means = self.GaussianMixture.model_.means.detach().clone().to(self.device)
+            self.covs = self.GaussianMixture.model_.covariances.detach().clone().to(self.device)
 
-        # Compute initial responsibilities on device
-        probs = self.GaussianMixture.predict_proba(X)
-        if not torch.is_tensor(probs):
-            probs = torch.as_tensor(probs, dtype=torch.float32)
-        probs = probs.to(self.device).T  # (K, N)
-        self.cluster_probs = probs.detach().clone()
+            probs = self.GaussianMixture.predict_proba(X)
+            if not torch.is_tensor(probs):
+                probs = torch.as_tensor(probs, dtype=torch.float32)
+            probs = probs.to(self.device).T
+            self.cluster_probs = probs.detach().clone()
+            self.mixing_weights = self.cluster_probs.mean(dim=1)
 
-        # Mixing weights from responsibilities
-        self.mixing_weights = self.cluster_probs.mean(dim=1)  # (K,)
-
-        # ---- Optional: smoothed E→Smooth→M loop on GPU ----------------------
-        if label_smoothing_flag:
+        if self.solver_mode == "legacy-stepwise":
+            self._run_legacy_stepwise_em(
+                X,
+                label_smoothing_flag=label_smoothing_flag,
+                Markov_matrix=Markov_matrix,
+                smoothing_iterations=smoothing_iterations,
+                tol=tol,
+            )
+        elif label_smoothing_flag:
             if Markov_matrix is None:
                 raise ValueError(
                     "Markov_matrix is required when label_smoothing_flag=True. "
@@ -376,6 +553,12 @@ class GMM(object):
 
                 if loglikelihood_diff <= tol:
                     break
+        elif self.post_stepwise_epochs > 0:
+            self._run_post_stepwise_em(
+                X,
+                max_epoch=self.post_stepwise_epochs,
+                tol=self.post_stepwise_tol if self.post_stepwise_tol is not None else tol,
+            )
 
         # ---- Finalise: move everything to numpy for downstream use -----------
         self.log_likelihood = float(self._LogLikelihood_torch(X).detach().cpu().item())
@@ -392,6 +575,10 @@ class GMM(object):
             int(np.sum(self.cluster_assignments == k))
             for k in range(self.cluster_num)
         ]
+        self.discovery_cluster_ind = int(np.argmax(np.array([
+            0.0 if self.num_per_cluster[k] < 2 else np.std(self.means[k])
+            for k in range(self.cluster_num)
+        ])))
 
         # Convenience wrappers
         self.cluster = []
@@ -399,6 +586,77 @@ class GMM(object):
             self.cluster.append(
                 Cluster_Gaussian(self.means[k], self.covs[k])
             )
+
+    def _run_legacy_stepwise_em(self, X, label_smoothing_flag, Markov_matrix,
+                                smoothing_iterations, tol):
+        """GPU port of the original XTEC two-phase stepwise EM loop."""
+        if label_smoothing_flag:
+            if Markov_matrix is None:
+                raise ValueError(
+                    "Markov_matrix is required when label_smoothing_flag=True. "
+                    "Use GMM_kernels.Build_Markov_Matrix() to construct one."
+                )
+            self.Markov_matrix = Markov_matrix.to(self.device)
+
+        N = int(X.shape[0])
+        batch_num = min(self.batch_num, N) if N > 0 else 1
+        batch_base_num = N // batch_num if batch_num > 0 else 0
+        batch_mod_num = N % batch_num if batch_num > 0 else 0
+
+        loglikelihood_diff = 1e6
+        loglikelihood_new = torch.tensor(-1e6, device=self.device, dtype=X.dtype)
+
+        while loglikelihood_diff > tol and self.epoch < self.max_batch_epoch:
+            loglikelihood_old = loglikelihood_new
+            X_batch_source = X
+            if batch_num != 1:
+                perm = torch.randperm(N, device=self.device)
+                X_batch_source = X[perm]
+
+            left_bound = 0
+            right_bound = 0
+            for batch_val in range(batch_num):
+                right_bound += batch_base_num + (1 if batch_val < batch_mod_num else 0)
+                data_batch = X_batch_source[left_bound:right_bound]
+                left_bound = right_bound
+                self._E_Step_torch(data_batch)
+                self._M_Step_torch(data_batch)
+
+            loglikelihood_new = self._LogLikelihood_torch(X)
+            loglikelihood_diff = torch.abs(loglikelihood_new - loglikelihood_old).item()
+            self.epoch += 1
+
+        loglikelihood_diff = 1e6
+        loglikelihood_new = torch.tensor(-1e6, device=self.device, dtype=X.dtype)
+        batch_epoch = self.epoch
+        self.converged = None
+        while loglikelihood_diff > tol and self.epoch < batch_epoch + self.max_full_epoch + 1:
+            loglikelihood_old = loglikelihood_new
+            self._E_Step_torch(X)
+            if label_smoothing_flag:
+                self._Smooth_Labels_torch(smoothing_iterations)
+            self._M_Step_torch(X)
+            loglikelihood_new = self._LogLikelihood_torch(X)
+            loglikelihood_diff = torch.abs(loglikelihood_new - loglikelihood_old).item()
+            self.loglikelihood = float(loglikelihood_new.detach().cpu().item())
+            self.epoch += 1
+
+            if self.epoch == batch_epoch + self.max_full_epoch + 1:
+                self.converged = False
+            if loglikelihood_diff <= tol:
+                self.converged = True
+
+    def _run_post_stepwise_em(self, X, max_epoch, tol):
+        """Refine a torchgmm solution with GPU-native stepwise EM."""
+        loglikelihood_new = self._LogLikelihood_torch(X)
+        for _ in range(int(max_epoch)):
+            loglikelihood_old = loglikelihood_new
+            self._E_Step_torch(X)
+            self._M_Step_torch(X)
+            self.epoch += 1
+            loglikelihood_new = self._LogLikelihood_torch(X)
+            if torch.abs(loglikelihood_new - loglikelihood_old).item() <= tol:
+                break
 
     # ------------------------------------------------------------------
     # Torch-native E / M / LogLikelihood for the smoothed EM loop

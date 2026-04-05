@@ -123,6 +123,62 @@ xtec-gpu bic-d data.nxs -o results/ --min-nc 2 --max-nc 14
 xtec-gpu bic-s data.nxs -o results/ --min-nc 2 --max-nc 14
 ```
 
+## Agentic Workflow + MCP
+
+For automatic mode (`d` vs `s`) and cluster-count selection, use:
+
+```bash
+python scripts/xtec_agentic_workflow.py data.nxs -o workflow_runs/run1 --device cuda:1
+```
+
+If the recommended mode is `d`, the workflow uses `sklearn-kmeans` init by default.
+By default, the workflow also materializes per-`k` sweep artifacts for manual oversight.
+
+Docs:
+
+- `running_instructions.md`
+- `agent.md`
+- `claude.md`
+- `gemini.md`
+
+MCP server:
+
+```bash
+python scripts/xtec_workflow_mcp.py
+```
+
+### Workflow script options (`scripts/xtec_agentic_workflow.py`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `input` | — | Path to `.nxs` input file |
+| `-o`, `--output-root` | — | Workflow output directory |
+| `--entry` | `entry/data` | HDF5 dataset path in input file |
+| `--slices` | `None` | Slice string, e.g. `":,0.0:1.0,-10.0:10.0,-15.0:15.0"` |
+| `--threshold` / `--no-threshold` | on | Enable/disable KL background thresholding |
+| `--rescale` | `mean` | `mean`, `z-score`, `log-mean`, or `None` |
+| `--device` | `auto` | Compute device (`auto`, `cuda`, `cuda:1`, `mps`, `cpu`) |
+| `--min-nc` | `2` | Minimum cluster count in BIC sweep |
+| `--max-nc` | `14` | Maximum cluster count in BIC sweep |
+| `--candidate-modes` | `d,s` | Comma-separated candidate modes to evaluate |
+| `--random-state` | `0` | Random seed used for final `xtec-d` run |
+| `--no-run-final` | off | Skip final recommended command execution (recommendation-only mode) |
+| `--no-save-sweep-artifacts` | off | Skip per-`k` sweep artifact runs |
+
+### Workflow sweep artifacts
+
+When sweep artifacts are enabled, the workflow writes:
+
+- `workflow_runs/<run>/sweep_artifacts/d/d_kXX/` (for each `k` in `bic-d`)
+- `workflow_runs/<run>/sweep_artifacts/s/s_kXX/` (for each `k` in `bic-s`)
+
+Each per-`k` directory includes:
+
+- `results.h5` (cluster assignments, means/covariances, indices, and `data_thresholded`)
+- `trajectories.png`
+- `qmap.png`
+- `avg_intensities.png`
+
 ### Common options
 
 | Flag | Default | Description |
