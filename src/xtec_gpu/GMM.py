@@ -701,14 +701,11 @@ class GMM(object):
 
         # New covariances
         if self.cov_type == "diag":
-            # cov_k = sum_i C_ki * (x_i - mu_k)^2 / (N * w_k)
-            covs_new = torch.zeros(K, T, device=X.device, dtype=X.dtype)
-            for k in range(K):
-                diff = X - means_new[k].unsqueeze(0)  # (N, T)
-                covs_new[k] = (
-                    (self.cluster_probs[k].unsqueeze(1) * diff * diff).sum(dim=0)
-                    / (N * mw[k])
-                )
+            # Vectorized diagonal covariance update:
+            # cov_k = E_k[x^2] - (E_k[x])^2
+            ex2 = (self.cluster_probs @ (X * X)) / (N * mw.unsqueeze(1))
+            covs_new = ex2 - means_new * means_new
+            covs_new = covs_new.clamp(min=1e-12)
         else:
             # Full covariance: (K, T, T)
             covs_new = torch.zeros(K, T, T, device=X.device, dtype=X.dtype)
@@ -1182,6 +1179,10 @@ class GMM_kernels(object):
         N = data_inds.shape[0]
         D = data_inds.shape[1]
         inv_L2 = 1.0 / (L_scale ** 2)
+        # Equivalent threshold in squared-distance space:
+        # exp(-dist_sq * inv_L2) > zero_cutoff  <=>  dist_sq < -log(zero_cutoff)/inv_L2
+        safe_cutoff = max(float(zero_cutoff), 1e-38)
+        max_dist_sq = float(-np.log(safe_cutoff) / inv_L2)
 
         # Dynamic chunk size to bound memory allocation (Limit to ~250MB per chunk allocation if possible)
         # N=10E6 * C* D * 4 = 120M * C bytes... -> 120MB per C. Max C <= 20
@@ -1267,44 +1268,61 @@ class GMM_kernels(object):
                 # Attempt to build chunk
                 chunk_inds = data_inds[start:end]
                 
-                # Expand diff natively using loop to prevent full (C, N, D) allocation
-                kernel_vals = torch.zeros(end - start, N, device=device, dtype=torch.float32)
-                
                 if kernel_type == "local":
-                    dist_sq = torch.cdist(chunk_inds, data_inds, p=2.0) ** 2
-                    kernel_vals = torch.exp(-dist_sq * inv_L2)
-                    del dist_sq
+                    # Avoid sqrt from cdist; compute squared distances directly.
+                    # dist_sq = ||a||^2 + ||b||^2 - 2 a.b
+                    a2 = (chunk_inds * chunk_inds).sum(dim=1, keepdim=True)  # (C, 1)
+                    b2 = (data_inds * data_inds).sum(dim=1).unsqueeze(0)     # (1, N)
+                    dist_sq = (a2 + b2 - 2.0 * (chunk_inds @ data_inds.T)).clamp(min=0.0)
+                    if uniform_similarity:
+                        mask = dist_sq < max_dist_sq
+                        vals_chunk = torch.ones(int(mask.sum().item()), dtype=torch.float32, device=device)
+                    else:
+                        kernel_vals = torch.exp(-dist_sq * inv_L2)
+                        mask = kernel_vals > zero_cutoff
+                        vals_chunk = kernel_vals[mask]
+                        del kernel_vals
+                    del a2, b2, dist_sq
                 elif kernel_type == "periodic":
+                    phase_sq = torch.zeros(end - start, N, device=device, dtype=torch.float32)
                     for d in range(D):
                         diff_d = chunk_inds[:, d:d+1] - data_inds[:, d:d+1].T
-                        kernel_vals += torch.sin(torch.pi / unit_cell_shape[d] * diff_d) ** 2
+                        phase_sq += torch.sin(torch.pi / unit_cell_shape[d] * diff_d) ** 2
                         del diff_d
-                    kernel_vals = torch.exp(-kernel_vals * inv_L2)
+                    if uniform_similarity:
+                        mask = phase_sq < max_dist_sq
+                        vals_chunk = torch.ones(int(mask.sum().item()), dtype=torch.float32, device=device)
+                    else:
+                        kernel_vals = torch.exp(-phase_sq * inv_L2)
+                        mask = kernel_vals > zero_cutoff
+                        vals_chunk = kernel_vals[mask]
+                        del kernel_vals
+                    del phase_sq
                 else:
                     raise ValueError(f"Invalid kernel_type: {kernel_type!r}")
 
-                # Sparsify: keep entries above cutoff
-                mask = kernel_vals > zero_cutoff  # (C, N)
-                rows_chunk, cols_chunk = torch.where(mask)  # local-row, global-col
-                rows_chunk = rows_chunk + start  # shift to global row index
-
-                if uniform_similarity:
-                    vals_chunk = torch.ones(rows_chunk.shape[0], dtype=torch.float32, device=device)
-                else:
-                    vals_chunk = kernel_vals[mask]
+                # Sparsify: keep entries above cutoff.
+                # KimGroup/XTEC compatibility:
+                # for each source index i, the original CPU implementation
+                # stores entries at (target=j, source=i), then row-normalizes.
+                # We preserve that orientation here so Smooth_Labels performs
+                # the same diffusion update.
+                rows_chunk_local, cols_chunk = torch.where(mask)  # source-local, target-global
+                cols_chunk_global = rows_chunk_local + start       # source-global
 
                 # Move extracted entries to CPU to avoid accumulating on GPU and free up memory
-                row_list.append(rows_chunk.cpu())
-                col_list.append(cols_chunk.cpu())
+                # row = target (j), col = source (i)
+                row_list.append(cols_chunk.cpu())
+                col_list.append(cols_chunk_global.cpu())
                 val_list.append(vals_chunk.cpu())
 
-                del kernel_vals, mask
-                torch.cuda.empty_cache()
+                del mask
                 
                 # Successfully computed chunk, advance pointer
                 start = end
             except torch.OutOfMemoryError:
-                torch.cuda.empty_cache()
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
                 # If OOM out, half the chunk size and try again purely on this block
                 if chunk_size <= 1:
                     raise MemoryError("Chunk size reduced to 1 but still OOM trying to build Adjacency matrix")
@@ -1335,7 +1353,7 @@ class GMM_kernels(object):
 
         Markov_matrix = torch.sparse_coo_tensor(
             coo.indices(), vals_scaled, size=(N, N), device=device
-        ).coalesce()
+        ).coalesce().to_sparse_csr()
 
         elapsed = time.time() - start_time
         print(f"\tFinished Building Adjacency Matrix in {elapsed:.2f} s\n")

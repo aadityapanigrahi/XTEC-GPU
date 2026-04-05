@@ -52,6 +52,51 @@ XTEC-GPU/
     └── Tutorial_XTEC_GPU-s_with_peak_averaging.ipynb
 ```
 
+## Organization
+
+The package is organized as:
+
+- `src/xtec_gpu/` core backend math and CLI
+- `src/xtec_gpu/workflows/` orchestration modules
+- `src/xtec_gpu/config/` shared run configuration models
+- `src/xtec_gpu/workflows/shared.py` shared execution/output helpers
+
+Additional documentation:
+
+- Output expectations are documented in [OUTPUT_CONTRACT.md](OUTPUT_CONTRACT.md).
+
+## Start Here (Code Map)
+
+- Core algorithms:
+  - `src/xtec_gpu/GMM.py`
+  - `src/xtec_gpu/Preprocessing.py`
+- Main CLI surface:
+  - `src/xtec_gpu/xtec_cli.py`
+- Workflow orchestration:
+  - `src/xtec_gpu/workflows/agentic.py`
+  - `src/xtec_gpu/workflows/comparison.py`
+- Shared workflow helpers:
+  - `src/xtec_gpu/workflows/shared.py`
+- Script entry points:
+  - `scripts/xtec_agentic_workflow.py`
+  - `scripts/xtec_workflow_mcp.py`
+  - `scripts/generate_cpu_gpu_tutorial_outputs.py`
+
+## Architecture Flow
+
+```
+xtec-gpu CLI / scripts
+        |
+        v
+workflow orchestration (src/xtec_gpu/workflows/*)
+        |
+        v
+core algorithms (GMM.py, Preprocessing.py)
+        |
+        v
+artifacts (results.h5, plots, workflow_report.json)
+```
+
 ---
 
 ## Python API
@@ -134,7 +179,7 @@ python scripts/xtec_agentic_workflow.py data.nxs -o workflow_runs/run1 --device 
 If the recommended mode is `d`, the workflow uses `kmeans++` init by default.
 By default, the workflow also materializes per-`k` sweep artifacts for manual oversight.
 Defaults use `kmeans++` initialization for `xtec-d` and `xtec-s`.
-For faithful replication against legacy/tutorial behavior, pass
+For faithful tutorial replication, pass
 `--init-strategy-mode sklearn-kmeans`.
 
 Docs:

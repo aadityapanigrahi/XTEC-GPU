@@ -29,6 +29,13 @@ Usage examples
 
 All methods save results (cluster assignments, means, covariances,
 plots) into the specified output directory.
+
+Ownership:
+- Owns CLI argument parsing and command dispatch.
+- Owns plotting and serialization for command outputs.
+
+Does not own:
+- core GMM/Preprocessing algorithm implementation internals.
 """
 
 import argparse
@@ -51,6 +58,7 @@ from .Preprocessing import (
     Threshold_Background,
 )
 from .GMM import GMM, GMM_kernels
+from .config import CommonRunConfig
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +70,18 @@ def _to_numpy(x):
     if isinstance(x, torch.Tensor):
         return x.detach().cpu().numpy()
     return np.asarray(x)
+
+
+def _common_config_from_args(args) -> CommonRunConfig:
+    """Normalize common CLI arguments into a shared config model."""
+    return CommonRunConfig(
+        entry=args.entry,
+        slices=args.slices,
+        threshold=bool(args.threshold),
+        rescale=args.rescale,
+        device=args.device,
+        init_strategy_mode=getattr(args, "init_strategy_mode", "kmeans++"),
+    )
 
 
 def _get_device(device_arg="auto"):
@@ -594,15 +614,16 @@ def _plot_avg_intensities(data, Data_thresh, cluster_assigns, nc, outdir,
 
 def run_xtec_d(args):
     """XTEC-d: direct GMM clustering (torchgmm, GPU preprocessing)."""
-    data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device(args.device)
+    common_cfg = _common_config_from_args(args)
+    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    device = _get_device(common_cfg.device)
     nc = args.n_clusters
 
-    print(f"[XTEC-d] {nc} clusters | threshold={args.threshold} | "
-          f"rescale={args.rescale} | device={device}")
+    print(f"[XTEC-d] {nc} clusters | threshold={common_cfg.threshold} | "
+          f"rescale={common_cfg.rescale} | device={device}")
 
     t0 = time.time()
-    thresh_type = "KL" if args.threshold else "No threshold"
+    thresh_type = "KL" if common_cfg.threshold else "No threshold"
     masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
     threshold = Threshold_Background(masked, threshold_type=thresh_type,
                                      device=device)
@@ -612,7 +633,7 @@ def run_xtec_d(args):
         threshold.data_thresholded,
         threshold.ind_thresholded,
         nc,
-        args.rescale,
+        common_cfg.rescale,
         device,
         random_state=0 if args.random_state is None else args.random_state,
         reorder=args.reorder_clusters,
@@ -639,7 +660,7 @@ def run_xtec_d(args):
     _save_results(args.output, cluster_assigns, cluster_assigns, Data_ind_np,
                   Data_thresh_np, cluster_means, cluster_covs)
     _plot_qmap(data, Data_ind_np, cluster_assigns, nc, args.output)
-    _plot_trajectories(data, cluster_means, cluster_covs, nc, args.rescale,
+    _plot_trajectories(data, cluster_means, cluster_covs, nc, common_cfg.rescale,
                        args.output)
     _plot_avg_intensities(data, Data_thresh_np, cluster_assigns, nc,
                           args.output)
@@ -855,15 +876,16 @@ def run_tutorial_d(args):
 
 def run_xtec_s(args):
     """XTEC-s: peak-averaged GMM clustering (GPU via torchgmm)."""
-    data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device(args.device)
+    common_cfg = _common_config_from_args(args)
+    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    device = _get_device(common_cfg.device)
     nc = args.n_clusters
 
-    print(f"[XTEC-s] {nc} clusters | threshold={args.threshold} | "
-          f"rescale={args.rescale} | device={device}")
+    print(f"[XTEC-s] {nc} clusters | threshold={common_cfg.threshold} | "
+          f"rescale={common_cfg.rescale} | device={device}")
 
     t0 = time.time()
-    thresh_type = "KL" if args.threshold else "No threshold"
+    thresh_type = "KL" if common_cfg.threshold else "No threshold"
     masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
     threshold = Threshold_Background(masked, threshold_type=thresh_type,
                                      device=device)
@@ -871,7 +893,7 @@ def run_xtec_s(args):
     Peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
     Data_thresh = Peak_avg.peak_avg_data
 
-    Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
+    Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
 
     Data_for_GMM = Rescaled_data.T
     gmm_kwargs = {
@@ -914,7 +936,7 @@ def run_xtec_s(args):
     _save_results(args.output, cluster_assigns, pixel_assigns, Data_ind_np,
                   Data_thresh_np, cluster_means, cluster_covs)
     _plot_qmap(data, Data_ind_np, pixel_assigns, nc, args.output)
-    _plot_trajectories(data, cluster_means, cluster_covs, nc, args.rescale,
+    _plot_trajectories(data, cluster_means, cluster_covs, nc, common_cfg.rescale,
                        args.output)
     _plot_avg_intensities(data, Data_thresh_np, cluster_assigns, nc,
                           args.output)
@@ -922,119 +944,108 @@ def run_xtec_s(args):
 
 def run_label_smooth(args):
     """XTEC label smooth: GMM with Markov label smoothing (GPU)."""
-    print("\n[Under Construction] Label smoothening is currently disabled due to "
-          "out-of-memory issues on extremely large datasets. It will be patched soon.")
-    
-    # PATCH INSTRUCTIONS FOR FUTURE REFERNCE:
-    # Use a 3-layer strategy.
-    # 
-    # Immediate (no algorithm change)
-    # Lower chunk_size in Build_Markov_Matrix (4096 -> 512 or 256).
-    # Increase zero_cutoff (1e-2 -> 5e-2) if acceptable.
-    # Reduce L_scale slightly.
-    # Force cov_type="diag" for GMM (already default).
-    # 
-    # Keep exact functionality, fix memory properly
-    # In GMM.py, replace (row_chunk x N) build with 2D tiling (row_chunk x col_chunk).
-    # Accumulate row/col/val on CPU torch tensors (.cpu()), not GPU lists.
-    # Keep kernel/cutoff/row-normalization unchanged, so behavior matches old code.
-    # 
-    # Add CLI args in xtec_cli.py:
-    # --markov-row-chunk
-    # --markov-col-chunk
-    # --zero-cutoff
-    # 
-    # Robust scaling
-    # Auto-select chunk sizes from free VRAM (torch.cuda.mem_get_info) with a safety margin (e.g., 60%).
-    # Optional fallback: if CUDA OOM during Markov build, retry with half chunk sizes automatically.
-    
-    # --- CURRENT CODE (COMMENTED OUT FOR FUTURE USE) ---
-    # data = _load_data(args.input, args.entry, args.slices)
-    # device = _get_device(args.device)
-    # nc = args.n_clusters
-    #
-    # print(f"[Label Smooth] {nc} clusters | threshold={args.threshold} | "
-    #       f"rescale={args.rescale} | L_scale={args.L_scale} | "
-    #       f"smooth_type={args.smooth_type} | device={device}")
-    #
-    # t0 = time.time()
-    # thresh_type = "KL" if args.threshold else "No threshold"
-    # masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
-    # threshold = Threshold_Background(masked, threshold_type=thresh_type,
-    #                                  device=device)
-    # Data_thresh = threshold.data_thresholded
-    # Data_ind = threshold.ind_thresholded
-    #
-    # Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
-    #
-    # # Build unit cell shape for periodic kernel
-    # kernel_type = args.smooth_type
-    # unit_cell_shape = None
-    # if kernel_type == "periodic":
-    #     unit_cell_shape = []
-    #     for nxq in data.nxaxes[1:]:
-    #         q = nxq.nxvalue
-    #         x = np.min(q[q % 1 == 0])
-    #         l = len(nxq[x : x + 1]) - 1
-    #         unit_cell_shape.append(l)
-    #     unit_cell_shape = np.array(unit_cell_shape)
-    #
-    # # Build Markov matrix on GPU
-    # Markov_matrix = GMM_kernels.Build_Markov_Matrix(
-    #     Data_ind, args.L_scale, kernel_type, unit_cell_shape, device=device
-    # )
-    #
-    # Data_for_GMM = Rescaled_data.T
-    # clusterGMM = GMM(Data_for_GMM, nc)
-    # clusterGMM.RunEM(
-    #     label_smoothing_flag=True, Markov_matrix=Markov_matrix
-    # )
-    #
-    # Data_thresh_np = _to_numpy(Data_thresh)
-    # Data_ind_np = _to_numpy(Data_ind)
-    # cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
-    # cluster_means = _to_numpy(clusterGMM.means)
-    # cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
-    #
-    # elapsed = time.time() - t0
-    # print(f"\n  Clustering completed in {elapsed:.2f} s")
-    # print(f"  Cluster sizes: {clusterGMM.num_per_cluster}")
-    #
-    # # Deterministic cluster ordering (descending low-T intensity)
-    # temp_values = data.nxaxes[0].nxvalue
-    # cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
-    #     _reorder_clusters(cluster_assigns, cluster_assigns,
-    #                       cluster_means, cluster_covs,
-    #                       Data_thresh_np, nc, temp_values)
-    # print(f"  Reordered cluster sizes: "
-    #       f"{[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
-    #
-    # _save_results(args.output, cluster_assigns, cluster_assigns, Data_ind_np,
-    #               Data_thresh_np, cluster_means, cluster_covs)
-    # _plot_qmap(data, Data_ind_np, cluster_assigns, nc, args.output)
-    # _plot_trajectories(data, cluster_means, cluster_covs, nc, args.rescale,
-    #                    args.output)
-    # _plot_avg_intensities(data, Data_thresh_np, cluster_assigns, nc,
-    #                       args.output)
-    
-    return
+    common_cfg = _common_config_from_args(args)
+    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    device = _get_device(common_cfg.device)
+    nc = args.n_clusters
+
+    print(f"[Label Smooth] {nc} clusters | threshold={common_cfg.threshold} | "
+          f"rescale={common_cfg.rescale} | L_scale={args.L_scale} | "
+          f"smooth_type={args.smooth_type} | device={device}")
+
+    t0 = time.time()
+    thresh_type = "KL" if common_cfg.threshold else "No threshold"
+    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
+    threshold = Threshold_Background(masked, threshold_type=thresh_type,
+                                     device=device)
+    Data_thresh = threshold.data_thresholded
+    Data_ind = threshold.ind_thresholded
+
+    Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
+
+    kernel_type = args.smooth_type
+    unit_cell_shape = None
+    if kernel_type == "periodic":
+        # KimGroup/XTEC parity: infer unit-cell spans from integer-indexed axis windows.
+        unit_cell_shape = []
+        for nxq in data.nxaxes[1:]:
+            q = nxq.nxvalue
+            x = np.min(q[q % 1 == 0])
+            l = len(nxq[x : x + 1]) - 1
+            unit_cell_shape.append(l)
+        unit_cell_shape = np.asarray(unit_cell_shape)
+
+    Markov_matrix = GMM_kernels.Build_Markov_Matrix(
+        Data_ind,
+        L_scale=args.L_scale,
+        kernel_type=kernel_type,
+        unit_cell_shape=unit_cell_shape,
+        zero_cutoff=args.zero_cutoff,
+        device=device,
+        chunk_size=args.markov_chunk_size,
+    )
+
+    Data_for_GMM = Rescaled_data.T
+    gmm_kwargs = {
+        "cov_type": "diag",
+        "solver_mode": args.solver_mode,
+        "init_strategy_mode": args.init_strategy_mode,
+        "tol": args.em_tol,
+        "post_stepwise_epochs": int(args.post_stepwise_epochs),
+        "post_stepwise_tol": args.post_stepwise_tol,
+        "batch_num": int(args.batch_num),
+        "max_batch_epoch": int(args.max_batch_epoch),
+        "max_full_epoch": int(args.max_full_epoch),
+    }
+    if args.random_state is not None:
+        gmm_kwargs["random_state"] = int(args.random_state)
+    clusterGMM = GMM(Data_for_GMM, nc, **gmm_kwargs)
+    clusterGMM.RunEM(label_smoothing_flag=True, Markov_matrix=Markov_matrix)
+
+    Data_thresh_np = _to_numpy(Data_thresh)
+    Data_ind_np = _to_numpy(Data_ind)
+    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+    cluster_means = _to_numpy(clusterGMM.means)
+    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(nc)]
+
+    elapsed = time.time() - t0
+    print(f"\n  Clustering completed in {elapsed:.2f} s")
+    print(f"  Cluster sizes: {clusterGMM.num_per_cluster}")
+
+    if args.reorder_clusters:
+        temp_values = data.nxaxes[0].nxvalue
+        cluster_assigns, cluster_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(cluster_assigns, cluster_assigns,
+                              cluster_means, cluster_covs,
+                              Data_thresh_np, nc, temp_values)
+        print(f"  Reordered cluster sizes: "
+              f"{[int(np.sum(cluster_assigns == k)) for k in range(nc)]}")
+
+    _save_results(args.output, cluster_assigns, cluster_assigns, Data_ind_np,
+                  Data_thresh_np, cluster_means, cluster_covs)
+    _plot_qmap(data, Data_ind_np, cluster_assigns, nc, args.output)
+    _plot_trajectories(data, cluster_means, cluster_covs, nc, common_cfg.rescale,
+                       args.output)
+    _plot_avg_intensities(data, Data_thresh_np, cluster_assigns, nc,
+                          args.output)
 
 
 def run_bic_d(args):
     """BIC score sweep for XTEC-d (torchgmm)."""
-    data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device(args.device)
+    common_cfg = _common_config_from_args(args)
+    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    device = _get_device(common_cfg.device)
 
     print(f"[BIC XTEC-d] nc={args.min_nc}..{args.max_nc} | "
-          f"threshold={args.threshold} | rescale={args.rescale}")
+          f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
 
-    thresh_type = "KL" if args.threshold else "No threshold"
+    thresh_type = "KL" if common_cfg.threshold else "No threshold"
     masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
     threshold = Threshold_Background(masked, threshold_type=thresh_type,
                                      device=device)
     Data_thresh = threshold.data_thresholded
 
-    Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
+    Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
 
     Data_for_GMM = Rescaled_data.T
     n_samples, n_features = map(int, Data_for_GMM.shape)
@@ -1073,20 +1084,21 @@ def run_bic_d(args):
 
 def run_bic_s(args):
     """BIC score sweep for XTEC-s (peak averaging, torchgmm)."""
-    data = _load_data(args.input, args.entry, args.slices)
-    device = _get_device(args.device)
+    common_cfg = _common_config_from_args(args)
+    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    device = _get_device(common_cfg.device)
 
     print(f"[BIC XTEC-s] nc={args.min_nc}..{args.max_nc} | "
-          f"threshold={args.threshold} | rescale={args.rescale}")
+          f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
 
-    thresh_type = "KL" if args.threshold else "No threshold"
+    thresh_type = "KL" if common_cfg.threshold else "No threshold"
     masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
     threshold = Threshold_Background(masked, threshold_type=thresh_type,
                                      device=device)
     Peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
     Data_thresh = Peak_avg.peak_avg_data
 
-    Rescaled_data = _rescale(threshold, Data_thresh, args.rescale, device)
+    Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
 
     Data_for_GMM = Rescaled_data.T
     n_samples, n_features = map(int, Data_for_GMM.shape)
@@ -1358,6 +1370,21 @@ def build_parser():
     sp_ls.add_argument("--smooth-type", choices=["local", "periodic"],
                        default="local",
                        help="Smoothing kernel type (default: local)")
+    sp_ls.add_argument("--zero-cutoff", type=float, default=1e-2,
+                       help="Drop Markov entries below this similarity value "
+                            "(default: 1e-2)")
+    sp_ls.add_argument("--markov-chunk-size", type=int, default=4096,
+                       help="Chunk size used to build the Markov matrix "
+                            "(default: 4096)")
+    sp_ls.add_argument("--em-tol", type=float, default=1e-5,
+                       help="EM convergence tolerance for label smoothing "
+                            "(default: 1e-5, KimGroup parity)")
+    _add_gmm_parity_args(sp_ls, random_state_default=None,
+                         reorder_default=False,
+                         random_state_help_suffix="None for label-smooth",
+                         solver_mode_default="legacy-stepwise",
+                         init_strategy_default="xtec",
+                         post_stepwise_epochs_default=0)
     sp_ls.set_defaults(func=run_label_smooth)
 
     # -- bic-d ------------------------------------------------------------
