@@ -17,6 +17,8 @@ import torch
 
 from .Preprocessing import Threshold_Background
 
+_DEFAULT_STREAM_CHUNK_BYTES = 1 << 30  # 1 GiB
+
 
 def _decode_attr_value(value):
     if isinstance(value, bytes):
@@ -46,8 +48,28 @@ def _chunk_shape(spatial_shape: Sequence[int], target_voxels: int) -> Tuple[int,
     ndim = len(spatial_shape)
     if ndim == 0:
         return tuple()
-    base = max(1, int(round(float(target_voxels) ** (1.0 / float(ndim)))))
-    return tuple(max(1, min(int(size), base)) for size in spatial_shape)
+    # Fill chunk sizes progressively across axes so the product approaches the
+    # target even for anisotropic shapes (e.g., small first momentum axis).
+    remaining = max(1.0, float(target_voxels))
+    out: List[int] = []
+    for axis, size in enumerate(spatial_shape):
+        remaining_axes = max(1, ndim - axis)
+        ideal = int(round(remaining ** (1.0 / float(remaining_axes))))
+        c = max(1, min(int(size), ideal))
+        out.append(c)
+        remaining = max(1.0, remaining / float(c))
+    return tuple(out)
+
+
+def _resolve_chunk_voxels(data_shape: Sequence[int], requested_chunk_voxels: int) -> Tuple[int, bool]:
+    """Resolve spatial chunk voxels from request; <=0 means auto (~1 GiB target)."""
+    req = int(requested_chunk_voxels)
+    if req > 0:
+        return req, False
+    t = max(1, int(data_shape[0]))
+    bytes_per_voxel = t * np.dtype(np.float64).itemsize
+    auto_voxels = max(1, int(_DEFAULT_STREAM_CHUNK_BYTES // max(1, bytes_per_voxel)))
+    return auto_voxels, True
 
 
 def _iter_spatial_chunks(
@@ -63,36 +85,22 @@ def _iter_spatial_chunks(
         yield tuple(int(x) for x in starts), slices
 
 
-class _ReservoirSketch:
-    """Uniform reservoir sketch for approximate quantiles."""
+def _read_block_full_temperature(
+    dataset: h5py.Dataset,
+    spatial_slices: Sequence[slice],
+) -> np.ndarray:
+    """Read a streamed block while preserving the full temperature axis.
 
-    def __init__(self, capacity: int, seed: int = 0) -> None:
-        self.capacity = max(1, int(capacity))
-        self._rng = np.random.default_rng(int(seed))
-        self._values = np.empty(0, dtype=np.float64)
-        self._priorities = np.empty(0, dtype=np.float64)
-
-    def update(self, values: np.ndarray) -> None:
-        vals = np.asarray(values, dtype=np.float64).reshape(-1)
-        if vals.size == 0:
-            return
-        pr = self._rng.random(vals.size)
-        if self._values.size == 0:
-            merged_vals = vals
-            merged_pr = pr
-        else:
-            merged_vals = np.concatenate([self._values, vals], axis=0)
-            merged_pr = np.concatenate([self._priorities, pr], axis=0)
-        if merged_vals.size > self.capacity:
-            keep = np.argpartition(merged_pr, self.capacity - 1)[: self.capacity]
-            self._values = merged_vals[keep]
-            self._priorities = merged_pr[keep]
-        else:
-            self._values = merged_vals
-            self._priorities = merged_pr
-
-    def values(self) -> np.ndarray:
-        return np.asarray(self._values, dtype=np.float64)
+    Chunking is only permitted across spatial/momentum axes. The leading
+    temperature axis is always read in full.
+    """
+    block = np.asarray(dataset[(slice(None),) + tuple(spatial_slices)], dtype=np.float64)
+    if block.shape[0] != int(dataset.shape[0]):
+        raise RuntimeError(
+            "Streamed block must preserve the full temperature axis; "
+            f"expected {int(dataset.shape[0])}, got {int(block.shape[0])}."
+        )
+    return block
 
 
 @dataclass
@@ -105,6 +113,50 @@ class _CutoffStats:
     max_log: float
     bin_width: float
     n_bins: int
+    approx_iqr: float | None = None
+    exact_iqr: float | None = None
+
+
+def _exact_kl_cutoff_from_logs(
+    log_sample: np.ndarray,
+    *,
+    mean_global: float,
+    std_global: float,
+    compute_device: torch.device,
+) -> Tuple[float, str, bool, float, int]:
+    helper = Threshold_Background.__new__(Threshold_Background)
+    log_t = torch.as_tensor(log_sample, dtype=torch.float64, device=compute_device)
+    log_sorted_t = torch.sort(log_t).values
+    bin_size_t = helper.Freedman_Diaconis_for_bin_width(log_sorted_t, device=compute_device)
+    y_bins_t, x_bins_t = helper.hist(log_t, bin_size_t, device=compute_device)
+    helper.bin_size = torch.as_tensor(float(bin_size_t.item()), dtype=torch.float64, device=compute_device)
+    try:
+        opt_idx = helper.Truncate(
+            x_bins_t,
+            y_bins_t,
+            log_sorted_t,
+            max_iter=100,
+            device=compute_device,
+            dtype=torch.float64,
+        )
+        cutoff = float(x_bins_t[int(opt_idx)].item())
+    except Exception as exc:
+        raise RuntimeError(
+            "Exact streamed KL cutoff failed during Truncate(). "
+            "No fallback path is enabled."
+        ) from exc
+
+    sanity_ok = not (
+        (cutoff > mean_global + 2.0 * std_global) or (cutoff < mean_global - std_global)
+    )
+    if not sanity_ok:
+        raise RuntimeError(
+            "Exact streamed KL cutoff failed sanity bounds. "
+            "No fallback path is enabled."
+        )
+    mode = "exact-kl"
+    success = True
+    return cutoff, mode, success, float(bin_size_t.item()), int(x_bins_t.numel())
 
 
 class StreamedThresholdResult:
@@ -145,7 +197,12 @@ def _estimate_cutoff(
     max_bins: int,
     exact_log_limit: int,
     seed: int,
+    compute_device: torch.device,
 ) -> _CutoffStats:
+    # Keep older args for CLI/workflow compatibility; exact streamed KL is now
+    # the default robust path.
+    _ = (reservoir_size, max_bins, seed)
+
     if not threshold_enabled:
         return _CutoffStats(
             cutoff=-1e6,
@@ -156,6 +213,8 @@ def _estimate_cutoff(
             max_log=float("nan"),
             bin_width=float("nan"),
             n_bins=0,
+            approx_iqr=None,
+            exact_iqr=None,
         )
 
     spatial_shape = tuple(int(x) for x in dataset.shape[1:])
@@ -165,12 +224,9 @@ def _estimate_cutoff(
     min_log = float("inf")
     max_log = float("-inf")
     exact_logs: List[np.ndarray] = []
-    exact_count = 0
-    exact_mode = True
-    sketch = _ReservoirSketch(reservoir_size, seed=seed)
 
     for _starts, spatial_slices in _iter_spatial_chunks(spatial_shape, chunk_voxels):
-        block = np.asarray(dataset[(slice(None),) + spatial_slices], dtype=np.float64)
+        block = _read_block_full_temperature(dataset, spatial_slices)
         mean_t = block.mean(axis=0)
         valid = np.isfinite(mean_t) & (mean_t > 0.0)
         if not np.any(valid):
@@ -182,16 +238,13 @@ def _estimate_cutoff(
         sumsq_log += float(np.square(log_vals).sum())
         min_log = min(min_log, float(log_vals.min()))
         max_log = max(max_log, float(log_vals.max()))
-
-        if exact_mode and (exact_count + n) <= int(exact_log_limit):
-            exact_logs.append(log_vals.copy())
-            exact_count += n
-        else:
-            if exact_mode and exact_logs:
-                sketch.update(np.concatenate(exact_logs, axis=0))
-                exact_logs.clear()
-            exact_mode = False
-            sketch.update(log_vals)
+        exact_logs.append(log_vals.copy())
+        if int(exact_log_limit) > 0 and n_valid > int(exact_log_limit):
+            raise RuntimeError(
+                "Streamed exact cutoff exceeded --streamed-exact-log-limit. "
+                f"n_valid={n_valid}, limit={int(exact_log_limit)}. "
+                "Increase --streamed-exact-log-limit or reduce input volume."
+            )
 
     if n_valid == 0:
         return _CutoffStats(
@@ -203,107 +256,38 @@ def _estimate_cutoff(
             max_log=float("nan"),
             bin_width=float("nan"),
             n_bins=0,
+            approx_iqr=None,
+            exact_iqr=None,
         )
 
-    if exact_mode:
-        log_sample = np.concatenate(exact_logs, axis=0) if exact_logs else np.empty(0, dtype=np.float64)
-        mode = "exact"
-    else:
-        log_sample = sketch.values()
-        mode = "reservoir"
-
+    log_sample = np.concatenate(exact_logs, axis=0) if exact_logs else np.empty(0, dtype=np.float64)
     if log_sample.size == 0:
-        # Defensive fallback
-        log_sample = np.array([sum_log / float(n_valid)], dtype=np.float64)
+        return _CutoffStats(
+            cutoff=-1e6,
+            mode="empty-log-sample",
+            success=True,
+            n_valid=n_valid,
+            min_log=min_log,
+            max_log=max_log,
+            bin_width=float("nan"),
+            n_bins=0,
+            approx_iqr=None,
+            exact_iqr=None,
+        )
 
     n_float = float(max(1, n_valid))
     mean_global = sum_log / n_float
     var_global = max(sumsq_log / n_float - mean_global * mean_global, 0.0)
     std_global = float(np.sqrt(var_global))
 
-    if exact_mode:
-        helper = Threshold_Background.__new__(Threshold_Background)
-        log_t = torch.as_tensor(log_sample, dtype=torch.float64)
-        log_sorted_t = torch.sort(log_t).values
-        bin_size_t = helper.Freedman_Diaconis_for_bin_width(log_sorted_t, device=torch.device("cpu"))
-        y_bins_t, x_bins_t = helper.hist(log_t, bin_size_t, device=torch.device("cpu"))
-        helper.bin_size = torch.as_tensor(float(bin_size_t.item()), dtype=torch.float64)
-        try:
-            opt_idx = helper.Truncate(
-                x_bins_t,
-                y_bins_t,
-                log_sorted_t,
-                max_iter=100,
-                device=torch.device("cpu"),
-                dtype=torch.float64,
-            )
-            cutoff = float(x_bins_t[int(opt_idx)].item())
-            naive_mean = float(torch.mean(log_sorted_t).item())
-            naive_std = float(torch.std(log_sorted_t, unbiased=False).item())
-            sanity_ok = not (
-                (cutoff > naive_mean + 2.0 * naive_std) or (cutoff < naive_mean - naive_std)
-            )
-            mode = "exact-kl" if sanity_ok else "exact-kl-sanity-fail"
-            success = bool(sanity_ok)
-        except Exception:
-            cutoff = float(mean_global + 2.0 * std_global)
-            mode = "exact+simple-fallback"
-            success = False
-        return _CutoffStats(
-            cutoff=cutoff,
-            mode=mode,
-            success=success,
-            n_valid=n_valid,
-            min_log=min_log,
-            max_log=max_log,
-            bin_width=float(bin_size_t.item()),
-            n_bins=int(x_bins_t.numel()),
-        )
-
-    q25, q75 = np.quantile(log_sample, [0.25, 0.75], method="linear")
-    iqr = max(float(q75 - q25), np.finfo(np.float64).eps)
-    bin_width = max(iqr / (n_float ** (1.0 / 3.0)), np.finfo(np.float64).eps)
-
-    hist_span = max(max_log - min_log, np.finfo(np.float64).eps)
-    n_bins = int(np.ceil(hist_span / bin_width))
-    n_bins = max(2, min(int(max_bins), n_bins))
-    counts = np.zeros(n_bins, dtype=np.float64)
-    for _starts, spatial_slices in _iter_spatial_chunks(spatial_shape, chunk_voxels):
-        block = np.asarray(dataset[(slice(None),) + spatial_slices], dtype=np.float64)
-        mean_t = block.mean(axis=0)
-        valid = np.isfinite(mean_t) & (mean_t > 0.0)
-        if not np.any(valid):
-            continue
-        log_vals = np.log(mean_t[valid]).astype(np.float64, copy=False)
-        h, _ = np.histogram(log_vals, bins=n_bins, range=(min_log, max_log))
-        counts += h.astype(np.float64)
-
-    x_bins = min_log + np.arange(n_bins, dtype=np.float64) * bin_width
-    y_bins = counts / (n_float * bin_width)
-    helper = Threshold_Background.__new__(Threshold_Background)
-    helper.bin_size = torch.as_tensor(bin_width, dtype=torch.float64)
-    x_bins_t = torch.as_tensor(x_bins, dtype=torch.float64)
-    y_bins_t = torch.as_tensor(y_bins, dtype=torch.float64)
-    log_sorted_t = torch.as_tensor(np.sort(log_sample), dtype=torch.float64)
-    try:
-        opt_idx = helper.Truncate(
-            x_bins_t,
-            y_bins_t,
-            log_sorted_t,
-            max_iter=100,
-            device=torch.device("cpu"),
-            dtype=torch.float64,
-        )
-        cutoff = float(x_bins_t[int(opt_idx)].item())
-        upper = mean_global + 2.0 * std_global
-        lower = mean_global - 1.0 * std_global
-        sanity_ok = not (cutoff > upper or cutoff < lower)
-        mode = "reservoir-kl" if sanity_ok else "reservoir-kl-sanity-fail"
-        success = bool(sanity_ok)
-    except Exception:
-        cutoff = float(mean_global + 2.0 * std_global)
-        mode = "reservoir+simple-fallback"
-        success = False
+    q25_exact, q75_exact = np.quantile(log_sample, [0.25, 0.75], method="linear")
+    iqr_exact = float(q75_exact - q25_exact)
+    cutoff, mode, success, bin_width, n_bins = _exact_kl_cutoff_from_logs(
+        log_sample,
+        mean_global=mean_global,
+        std_global=std_global,
+        compute_device=compute_device,
+    )
 
     return _CutoffStats(
         cutoff=cutoff,
@@ -314,6 +298,8 @@ def _estimate_cutoff(
         max_log=max_log,
         bin_width=bin_width,
         n_bins=n_bins,
+        approx_iqr=iqr_exact,
+        exact_iqr=iqr_exact,
     )
 
 
@@ -323,7 +309,7 @@ def build_streamed_threshold_result(
     entry_path: str,
     threshold_enabled: bool,
     device: torch.device | str,
-    chunk_voxels: int = 200_000,
+    chunk_voxels: int = 0,
     reservoir_size: int = 500_000,
     max_bins: int = 4_096,
     exact_log_limit: int = 2_000_000,
@@ -344,22 +330,24 @@ def build_streamed_threshold_result(
                 "Streamed preprocessing expects data with shape (T, *spatial) "
                 f"with at least 2 spatial dimensions. Got: {shape}"
             )
+        resolved_chunk_voxels, chunk_auto = _resolve_chunk_voxels(shape, int(chunk_voxels))
 
         cutoff_stats = _estimate_cutoff(
             signal_ds,
             threshold_enabled=bool(threshold_enabled),
-            chunk_voxels=int(chunk_voxels),
+            chunk_voxels=int(resolved_chunk_voxels),
             reservoir_size=int(reservoir_size),
             max_bins=int(max_bins),
             exact_log_limit=int(exact_log_limit),
             seed=int(seed),
+            compute_device=target_device,
         )
 
         data_chunks: List[np.ndarray] = []
         ind_chunks: List[np.ndarray] = []
         spatial_shape = shape[1:]
-        for starts, spatial_slices in _iter_spatial_chunks(spatial_shape, int(chunk_voxels)):
-            block = np.asarray(signal_ds[(slice(None),) + spatial_slices], dtype=np.float64)
+        for starts, spatial_slices in _iter_spatial_chunks(spatial_shape, int(resolved_chunk_voxels)):
+            block = _read_block_full_temperature(signal_ds, spatial_slices)
             mean_t = block.mean(axis=0)
             valid = np.isfinite(mean_t) & (mean_t > 0.0)
             if bool(threshold_enabled):
@@ -388,6 +376,9 @@ def build_streamed_threshold_result(
 
     data_thresholded = torch.as_tensor(data_thresholded_np, device=target_device)
     ind_thresholded = torch.as_tensor(ind_thresholded_np, device=target_device, dtype=torch.long)
+    resolved_chunk_shape = _chunk_shape(shape[1:], int(resolved_chunk_voxels))
+    est_chunk_voxels = int(np.prod(np.asarray(resolved_chunk_shape, dtype=np.int64)))
+    est_chunk_bytes = int(shape[0]) * est_chunk_voxels * np.dtype(np.float64).itemsize
     diagnostics: Dict[str, object] = {
         "mode": cutoff_stats.mode,
         "success": bool(cutoff_stats.success),
@@ -396,10 +387,33 @@ def build_streamed_threshold_result(
         "log_max": float(cutoff_stats.max_log) if np.isfinite(cutoff_stats.max_log) else None,
         "bin_width": float(cutoff_stats.bin_width) if np.isfinite(cutoff_stats.bin_width) else None,
         "n_bins": int(cutoff_stats.n_bins),
-        "chunk_voxels": int(chunk_voxels),
+        "chunk_voxels_requested": int(chunk_voxels),
+        "chunk_voxels": int(resolved_chunk_voxels),
+        "chunk_auto_1gib": bool(chunk_auto),
+        "chunk_shape": [int(x) for x in resolved_chunk_shape],
+        "estimated_chunk_bytes": int(est_chunk_bytes),
         "reservoir_size": int(reservoir_size),
         "exact_log_limit": int(exact_log_limit),
+        "cutoff_compute_device": str(target_device),
+        "approx_iqr": (
+            float(cutoff_stats.approx_iqr)
+            if cutoff_stats.approx_iqr is not None and np.isfinite(cutoff_stats.approx_iqr)
+            else None
+        ),
+        "exact_iqr": (
+            float(cutoff_stats.exact_iqr)
+            if cutoff_stats.exact_iqr is not None and np.isfinite(cutoff_stats.exact_iqr)
+            else None
+        ),
     }
+    if diagnostics["approx_iqr"] is not None and diagnostics["exact_iqr"] is not None:
+        exact_iqr = float(diagnostics["exact_iqr"])
+        if abs(exact_iqr) > np.finfo(np.float64).eps:
+            diagnostics["iqr_rel_err"] = float(
+                abs(float(diagnostics["approx_iqr"]) - exact_iqr) / abs(exact_iqr)
+            )
+        else:
+            diagnostics["iqr_rel_err"] = None
 
     return StreamedThresholdResult(
         device=target_device,

@@ -6,12 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import h5py
+import numpy as np
+
 from xtec_gpu.config import AgenticWorkflowConfig
 from xtec_gpu.workflows import agentic
 from xtec_gpu.workflows import WORKFLOW_REPORT_REQUIRED_KEYS
 from xtec_gpu.workflows.shared import build_bic_command
 from xtec_gpu import xtec_cli
 from xtec_gpu.config.run_config import CommonRunConfig
+from xtec_gpu.streamed_preprocessing import _estimate_cutoff, _read_block_full_temperature
 from xtec_gpu.xtec_cli import build_parser
 
 
@@ -115,7 +119,7 @@ class RefactorRegressionTests(unittest.TestCase):
         parser = build_parser()
         args_d = parser.parse_args(["xtec-d", "in.nxs", "-o", "out"])
         self.assertFalse(args_d.streamed_preprocess)
-        self.assertEqual(args_d.streamed_chunk_voxels, 200000)
+        self.assertEqual(args_d.streamed_chunk_voxels, 0)
         self.assertEqual(args_d.streamed_reservoir_size, 500000)
 
     def test_workflow_command_includes_streamed_flags_when_enabled(self) -> None:
@@ -159,6 +163,97 @@ class RefactorRegressionTests(unittest.TestCase):
             b = xtec_cli._get_or_build_threshold_d(args, fake_data, cfg, "cpu")
             self.assertIs(a, b)
             self.assertEqual(build_mock.call_count, 1)
+
+    def test_streamed_preprocess_rejects_runtime_slices(self) -> None:
+        # Guards fail-fast behavior: streamed preprocessing must not silently fallback.
+        cfg = CommonRunConfig(
+            entry="entry/data",
+            slices=":,0:1,-1:1,-1:1",
+            threshold=True,
+            device="cpu",
+            streamed_preprocess=True,
+        )
+        with self.assertRaises(ValueError):
+            xtec_cli._build_threshold_d(
+                SimpleNamespace(input="input.nxs", runtime_cache={}),
+                object(),
+                cfg,
+                "cpu",
+            )
+
+    def test_streamed_cutoff_uses_exact_kl_path(self) -> None:
+        # Guards exact streamed cutoff path and metadata shape.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "tiny.nxs"
+            data = np.full((4, 3, 3), 10.0, dtype=np.float64)
+            with h5py.File(path, "w") as h5:
+                grp = h5.create_group("entry")
+                grp.attrs["signal"] = "data"
+                grp.create_dataset("data", data=data)
+            with h5py.File(path, "r") as h5:
+                ds = h5["entry/data"]
+                with patch(
+                    "xtec_gpu.streamed_preprocessing._exact_kl_cutoff_from_logs",
+                    return_value=(1.23, "exact-kl", True, 0.5, 8),
+                ) as exact_mock:
+                    stats = _estimate_cutoff(
+                        ds,
+                        threshold_enabled=True,
+                        chunk_voxels=4,
+                        reservoir_size=2,
+                        max_bins=2,
+                        exact_log_limit=10_000,
+                        seed=0,
+                        compute_device=xtec_cli._get_device("cpu"),
+                    )
+        self.assertTrue(exact_mock.called)
+        self.assertEqual(stats.mode, "exact-kl")
+        self.assertTrue(stats.success)
+        self.assertAlmostEqual(stats.cutoff, 1.23, places=12)
+        self.assertIsNotNone(stats.exact_iqr)
+        self.assertIsNotNone(stats.approx_iqr)
+        self.assertAlmostEqual(float(stats.exact_iqr), float(stats.approx_iqr), places=12)
+
+    def test_streamed_cutoff_raises_when_exact_limit_exceeded(self) -> None:
+        # Guards fail-fast behavior: no silent fallback when exact budget is exceeded.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "tiny_skip.nxs"
+            data = np.full((3, 4, 4), 5.0, dtype=np.float64)
+            with h5py.File(path, "w") as h5:
+                grp = h5.create_group("entry")
+                grp.attrs["signal"] = "data"
+                grp.create_dataset("data", data=data)
+            with h5py.File(path, "r") as h5:
+                ds = h5["entry/data"]
+                with self.assertRaises(RuntimeError):
+                    _estimate_cutoff(
+                        ds,
+                        threshold_enabled=True,
+                        chunk_voxels=4,
+                        reservoir_size=2,
+                        max_bins=2,
+                        exact_log_limit=1,
+                        seed=0,
+                        compute_device=xtec_cli._get_device("cpu"),
+                    )
+
+    def test_streamed_block_keeps_full_temperature_axis(self) -> None:
+        # Guards chunking contract: chunk spatial/momentum axes only, never temperature.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "tiny_temp_axis.nxs"
+            data = np.arange(5 * 4 * 6 * 7, dtype=np.float64).reshape(5, 4, 6, 7)
+            with h5py.File(path, "w") as h5:
+                grp = h5.create_group("entry")
+                grp.attrs["signal"] = "data"
+                grp.create_dataset("data", data=data)
+            with h5py.File(path, "r") as h5:
+                ds = h5["entry/data"]
+                block = _read_block_full_temperature(
+                    ds,
+                    (slice(1, 3), slice(2, 5), slice(0, 4)),
+                )
+        self.assertEqual(block.shape[0], data.shape[0])
+        self.assertEqual(block.shape[1:], (2, 3, 4))
 
 
 if __name__ == "__main__":

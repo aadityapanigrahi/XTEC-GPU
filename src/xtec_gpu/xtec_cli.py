@@ -84,10 +84,10 @@ def _common_config_from_args(args) -> CommonRunConfig:
         device=args.device,
         init_strategy_mode=getattr(args, "init_strategy_mode", "kmeans++"),
         streamed_preprocess=bool(getattr(args, "streamed_preprocess", False)),
-        streamed_chunk_voxels=int(getattr(args, "streamed_chunk_voxels", 200000)),
+        streamed_chunk_voxels=int(getattr(args, "streamed_chunk_voxels", 0)),
         streamed_reservoir_size=int(getattr(args, "streamed_reservoir_size", 500000)),
         streamed_max_bins=int(getattr(args, "streamed_max_bins", 4096)),
-        streamed_exact_log_limit=int(getattr(args, "streamed_exact_log_limit", 2000000)),
+        streamed_exact_log_limit=int(getattr(args, "streamed_exact_log_limit", 20000000)),
         streamed_seed=int(getattr(args, "streamed_seed", 0)),
     )
 
@@ -191,14 +191,15 @@ def _build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
         return _build_threshold(data, bool(common_cfg.threshold), device)
 
     if common_cfg.slices not in (None, ""):
-        print("[XTEC-d] streamed preprocessing requested with --slices; "
-              "falling back to standard in-memory threshold path.")
-        return _build_threshold(data, bool(common_cfg.threshold), device)
+        raise ValueError(
+            "Streamed preprocessing requires unsliced input. "
+            "Remove --slices when using --streamed-preprocess."
+        )
 
     print(
         "[XTEC-d] using streamed preprocessing "
-        f"(chunk_voxels={common_cfg.streamed_chunk_voxels}, "
-        f"reservoir_size={common_cfg.streamed_reservoir_size})"
+        f"(chunk_voxels_request={common_cfg.streamed_chunk_voxels}, "
+        f"exact_log_limit={common_cfg.streamed_exact_log_limit})"
     )
     return build_streamed_threshold_result(
         input_path=args.input,
@@ -227,10 +228,10 @@ def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
         bool(common_cfg.threshold),
         str(device),
         bool(getattr(common_cfg, "streamed_preprocess", False)),
-        int(getattr(common_cfg, "streamed_chunk_voxels", 200000)),
+        int(getattr(common_cfg, "streamed_chunk_voxels", 0)),
         int(getattr(common_cfg, "streamed_reservoir_size", 500000)),
         int(getattr(common_cfg, "streamed_max_bins", 4096)),
-        int(getattr(common_cfg, "streamed_exact_log_limit", 2000000)),
+        int(getattr(common_cfg, "streamed_exact_log_limit", 20000000)),
         int(getattr(common_cfg, "streamed_seed", 0)),
     )
     if key not in runtime_cache:
@@ -1361,37 +1362,37 @@ def build_parser():
         sp.add_argument(
             "--streamed-chunk-voxels",
             type=int,
-            default=200000,
-            help="Approximate number of spatial voxels per streamed slab "
-                 "(default: 200000).",
+            default=0,
+            help="Spatial voxels per streamed slab. <=0 enables auto mode "
+                 "targeting ~1 GiB chunk reads (default: 0).",
         )
         sp.add_argument(
             "--streamed-reservoir-size",
             type=int,
             default=500000,
-            help="Reservoir sketch capacity used for approximate quantiles in "
-                 "streamed KL cutoff estimation (default: 500000).",
+            help="Legacy compatibility knob for streamed cutoff path "
+                 "(default: 500000).",
         )
         sp.add_argument(
             "--streamed-max-bins",
             type=int,
             default=4096,
-            help="Maximum histogram bins in streamed KL cutoff estimation "
+            help="Legacy compatibility knob for streamed cutoff path "
                  "(default: 4096).",
         )
         sp.add_argument(
             "--streamed-exact-log-limit",
             type=int,
-            default=2000000,
-            help="If valid log-mean count stays below this limit, streamed KL "
-                 "uses exact quantiles instead of reservoir approximation "
-                 "(default: 2000000).",
+            default=20000000,
+            help="Maximum valid log-mean count for exact streamed KL cutoff "
+                 "before fail-fast error (default: 20000000).",
         )
         sp.add_argument(
             "--streamed-seed",
             type=int,
             default=0,
-            help="Random seed for streamed reservoir sampling (default: 0).",
+            help="Legacy compatibility knob for streamed cutoff path "
+                 "(default: 0).",
         )
 
     def _add_gmm_parity_args(sp, random_state_default=None,

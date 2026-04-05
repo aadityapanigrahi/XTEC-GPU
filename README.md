@@ -168,7 +168,7 @@ xtec-gpu bic-d data.nxs -o results/ --min-nc 2 --max-nc 14
 xtec-gpu bic-s data.nxs -o results/ --min-nc 2 --max-nc 14
 
 # Optional: streamed preprocessing for large/full-data d-mode runs
-xtec-gpu bic-d data.nxs -o results/ --streamed-preprocess --streamed-chunk-voxels 200000
+xtec-gpu bic-d data.nxs -o results/ --streamed-preprocess --streamed-chunk-voxels 0
 ```
 
 ## Agentic Workflow + MCP
@@ -216,11 +216,11 @@ python scripts/xtec_workflow_mcp.py
 | `--random-state` | `0` | Random seed used for final `xtec-d` run |
 | `--execution-backend` | `inprocess` | `inprocess` (faster, same code path) or `subprocess` (process isolation) |
 | `--streamed-preprocess` | off | Opt-in streamed preprocessing for large/full-data d-mode paths (`bic-d`, `xtec-d`) |
-| `--streamed-chunk-voxels` | `200000` | Approximate spatial voxels per streamed slab |
-| `--streamed-reservoir-size` | `500000` | Reservoir sketch size for streamed quantile approximation |
-| `--streamed-max-bins` | `4096` | Maximum histogram bins in streamed KL cutoff estimation |
-| `--streamed-exact-log-limit` | `2000000` | Exact cutoff path when valid log-means stay below this count |
-| `--streamed-seed` | `0` | Random seed used by streamed reservoir sketch |
+| `--streamed-chunk-voxels` | `0` | Spatial voxels per streamed slab; `<=0` enables auto mode targeting ~1 GiB chunks |
+| `--streamed-reservoir-size` | `500000` | Legacy compatibility knob (not used by exact streamed cutoff path) |
+| `--streamed-max-bins` | `4096` | Legacy compatibility knob (not used by exact streamed cutoff path) |
+| `--streamed-exact-log-limit` | `20000000` | Fail-fast guard for exact streamed cutoff (`n_valid` must not exceed this limit) |
+| `--streamed-seed` | `0` | Legacy compatibility knob (not used by exact streamed cutoff path) |
 | `--no-run-final` | off | Skip final recommended command execution (recommendation-only mode) |
 | `--no-save-sweep-artifacts` | off | Skip per-`k` sweep artifact runs |
 

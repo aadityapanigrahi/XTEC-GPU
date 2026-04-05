@@ -36,6 +36,14 @@ threshold preprocessing via:
 This keeps default behavior unchanged (feature is opt-in) and is currently
 wired to `bic-d` / `xtec-d` pathways.
 
+`--streamed-chunk-voxels` defaults to `0`, which auto-resolves chunking to
+about 1 GiB reads (temperature axis preserved, chunking only over momentum
+axes).
+
+Current streamed cutoff behavior is exact-KL by default (parity-oriented).
+`--streamed-exact-log-limit` is a fail-fast guard for very large runs; if
+exceeded, the command errors (no silent fallback path).
+
 ## Benchmark Notes
 
 On `/data/XTEC_GPU/test_dataset/srn0_XTEC.nxs` (GPU: `cuda:1`) with:

@@ -18,10 +18,10 @@ class CommonRunConfig:
     device: str = "auto"
     init_strategy_mode: str = "kmeans++"
     streamed_preprocess: bool = False
-    streamed_chunk_voxels: int = 200000
+    streamed_chunk_voxels: int = 0
     streamed_reservoir_size: int = 500000
     streamed_max_bins: int = 4096
-    streamed_exact_log_limit: int = 2000000
+    streamed_exact_log_limit: int = 20000000
     streamed_seed: int = 0
 
 
