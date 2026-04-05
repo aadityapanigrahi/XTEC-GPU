@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 
+from xtec_gpu import xtec_cli
 from xtec_gpu.config.run_config import AgenticWorkflowConfig
 from xtec_gpu.workflows.logging_utils import get_logger
 from xtec_gpu.workflows.shared import WORKFLOW_REPORT_REQUIRED_KEYS
@@ -56,13 +57,31 @@ def _load_bic(path: Path) -> Tuple[np.ndarray, np.ndarray]:
 def _run_bic(mode: str, cfg: AgenticWorkflowConfig, output_dir: Path, env: Dict[str, str]) -> Dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_bic_command(mode=mode, input_path=cfg.input_path, output_dir=output_dir, cfg=cfg)
-    run_checked(cmd, env=env)
+    if cfg.execution_backend == "inprocess":
+        bic_args = argparse.Namespace(
+            input=cfg.input_path,
+            output=str(output_dir),
+            entry=cfg.entry,
+            slices=cfg.slices,
+            threshold=bool(cfg.threshold),
+            rescale=cfg.rescale,
+            device=cfg.device,
+            min_nc=int(cfg.min_nc),
+            max_nc=int(cfg.max_nc),
+        )
+        if mode == "d":
+            xtec_cli.run_bic_d(bic_args)
+        else:
+            xtec_cli.run_bic_s(bic_args)
+    else:
+        run_checked(cmd, env=env)
     h5_name = "bic_xtec_d.h5" if mode == "d" else "bic_xtec_s.h5"
     ks, bics = _load_bic(output_dir / h5_name)
     best_idx = int(np.argmin(bics))
     return {
         "mode": mode,
         "command": cmd,
+        "execution_backend": cfg.execution_backend,
         "n_clusters": ks.tolist(),
         "bic_scores": [float(x) for x in bics],
         "best_k": int(ks[best_idx]),
@@ -86,7 +105,29 @@ def _run_xtec_d_with_init(
         init_strategy=init_strategy,
         random_state=cfg.random_state,
     )
-    run_checked(cmd, env=env)
+    if cfg.execution_backend == "inprocess":
+        run_args = argparse.Namespace(
+            input=cfg.input_path,
+            output=str(out_dir),
+            entry=cfg.entry,
+            slices=cfg.slices,
+            threshold=bool(cfg.threshold),
+            rescale=cfg.rescale,
+            device=cfg.device,
+            n_clusters=int(n_clusters),
+            random_state=int(cfg.random_state),
+            solver_mode="torchgmm",
+            init_strategy_mode=str(init_strategy),
+            post_stepwise_epochs=0,
+            post_stepwise_tol=None,
+            batch_num=1,
+            max_batch_epoch=50,
+            max_full_epoch=500,
+            reorder_clusters=True,
+        )
+        xtec_cli.run_xtec_d(run_args)
+    else:
+        run_checked(cmd, env=env)
     return cmd
 
 
@@ -105,7 +146,29 @@ def _run_xtec_s(
         n_clusters=n_clusters,
         init_strategy=init_strategy,
     )
-    run_checked(cmd, env=env)
+    if cfg.execution_backend == "inprocess":
+        run_args = argparse.Namespace(
+            input=cfg.input_path,
+            output=str(out_dir),
+            entry=cfg.entry,
+            slices=cfg.slices,
+            threshold=bool(cfg.threshold),
+            rescale=cfg.rescale,
+            device=cfg.device,
+            n_clusters=int(n_clusters),
+            random_state=None,
+            solver_mode="torchgmm",
+            init_strategy_mode=str(init_strategy),
+            post_stepwise_epochs=0,
+            post_stepwise_tol=None,
+            batch_num=1,
+            max_batch_epoch=50,
+            max_full_epoch=500,
+            reorder_clusters=True,
+        )
+        xtec_cli.run_xtec_s(run_args)
+    else:
+        run_checked(cmd, env=env)
     return cmd
 
 
@@ -231,6 +294,7 @@ def recommend_workflow(
             "candidate_modes": list(cfg.candidate_modes),
             "init_strategy_mode": cfg.init_strategy_mode,
             "random_state": cfg.random_state,
+            "execution_backend": cfg.execution_backend,
         },
         "bic_results": bic_results,
         "sweep_artifacts": sweep_artifacts if cfg.save_sweep_artifacts else None,
@@ -281,6 +345,12 @@ def _parse_args() -> argparse.Namespace:
         default=True,
         help="Skip per-k sweep artifact runs (results.h5 + trajectories/qmap/avg_intensities).",
     )
+    p.add_argument(
+        "--execution-backend",
+        choices=["inprocess", "subprocess"],
+        default="inprocess",
+        help="Run workflow commands in-process for lower overhead, or via subprocess for strict process isolation (default: inprocess).",
+    )
     return p.parse_args()
 
 
@@ -300,6 +370,7 @@ def config_from_args(args: argparse.Namespace) -> AgenticWorkflowConfig:
         run_final=bool(args.run_final),
         save_sweep_artifacts=bool(args.save_sweep_artifacts),
         init_strategy_mode=str(args.init_strategy_mode),
+        execution_backend=str(args.execution_backend),
     )
 
 

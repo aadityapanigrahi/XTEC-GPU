@@ -41,3 +41,4 @@ class AgenticWorkflowConfig(CommonRunConfig, SweepConfig):
     random_state: int = 0
     run_final: bool = True
     save_sweep_artifacts: bool = True
+    execution_backend: str = "inprocess"

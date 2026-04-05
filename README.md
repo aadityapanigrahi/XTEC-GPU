@@ -211,6 +211,7 @@ python scripts/xtec_workflow_mcp.py
 | `--candidate-modes` | `d,s` | Comma-separated candidate modes to evaluate |
 | `--init-strategy-mode` | `kmeans++` | Init strategy for `xtec-d`/`xtec-s` runs in the workflow |
 | `--random-state` | `0` | Random seed used for final `xtec-d` run |
+| `--execution-backend` | `inprocess` | `inprocess` (faster, same code path) or `subprocess` (process isolation) |
 | `--no-run-final` | off | Skip final recommended command execution (recommendation-only mode) |
 | `--no-save-sweep-artifacts` | off | Skip per-`k` sweep artifact runs |
 
@@ -248,6 +249,50 @@ Each per-`k` directory includes:
 |------|---------|-------------|
 | `--L-scale` | `0.05` | Smoothing length (pixel units) |
 | `--smooth-type` | `local` | `local` or `periodic` |
+| `--zero-cutoff` | `1e-2` | Markov sparsification cutoff |
+| `--markov-chunk-size` | `4096` | Chunk size used while building sparse Markov matrix |
+| `--em-tol` | `1e-5` | EM tolerance for `legacy-stepwise` label-smoothing |
+
+### CPU vs GPU benchmark (label-smooth parity profile)
+
+Profile used:
+
+- command: `label-smooth`
+- `--solver-mode legacy-stepwise`
+- `--init-strategy-mode xtec`
+- `--random-state 0`
+- `--em-tol 1e-5`
+- `--reorder-clusters`
+- input: `/data/XTEC_GPU/test_dataset/srn0_XTEC.nxs`
+- slices: `:,0.0:1.0,-4.0:4.0,-4.0:4.0`
+
+Latest measured run (April 5, 2026):
+
+- CPU (`--device cpu`)
+  - wall time: `55.37 s`
+  - clustering phase: `46.20 s`
+- GPU (`--device cuda:1`)
+  - wall time: `12.17 s`
+  - clustering phase: `2.55 s`
+
+Speedups:
+
+- wall time: `4.55x`
+- clustering phase: `18.12x`
+
+Behavior drift (best label alignment, CPU vs GPU):
+
+- assignment exact match: `0.9423`
+- ARI: `0.8578`
+- means MAE / max abs: `0.0309 / 0.2319`
+- covariances MAE / max abs: `0.0195 / 0.3380`
+
+Reference CPU implementation benchmark (`xtec_gpu.workflows.comparison` using
+KimGroup/XTEC CPU code) on the same sliced input:
+
+- CPU reference tutorial workflow: `34.95 s`
+- GPU CLI tutorial workflow: `16.31 s`
+- speedup: `2.14x`
 
 ### Output files
 
