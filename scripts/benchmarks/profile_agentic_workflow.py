@@ -31,6 +31,12 @@ def main() -> None:
     p.add_argument("--candidate-modes", default="d,s")
     p.add_argument("--init-strategy-mode", default="kmeans++")
     p.add_argument("--random-state", type=int, default=0)
+    p.add_argument("--streamed-preprocess", action="store_true", default=False)
+    p.add_argument("--streamed-chunk-voxels", type=int, default=200000)
+    p.add_argument("--streamed-reservoir-size", type=int, default=500000)
+    p.add_argument("--streamed-max-bins", type=int, default=4096)
+    p.add_argument("--streamed-exact-log-limit", type=int, default=2000000)
+    p.add_argument("--streamed-seed", type=int, default=0)
     p.add_argument("--execution-backend", choices=["inprocess", "subprocess"], default="inprocess")
     p.add_argument("--no-save-sweep-artifacts", action="store_true")
     p.add_argument("--no-run-final", action="store_true")
@@ -128,6 +134,12 @@ def main() -> None:
         max_nc=int(args.max_nc),
         candidate_modes=[x.strip() for x in args.candidate_modes.split(",") if x.strip()],
         random_state=int(args.random_state),
+        streamed_preprocess=bool(args.streamed_preprocess),
+        streamed_chunk_voxels=int(args.streamed_chunk_voxels),
+        streamed_reservoir_size=int(args.streamed_reservoir_size),
+        streamed_max_bins=int(args.streamed_max_bins),
+        streamed_exact_log_limit=int(args.streamed_exact_log_limit),
+        streamed_seed=int(args.streamed_seed),
         run_final=not bool(args.no_run_final),
         save_sweep_artifacts=not bool(args.no_save_sweep_artifacts),
         init_strategy_mode=args.init_strategy_mode,
@@ -160,6 +172,12 @@ def main() -> None:
             "max_nc": args.max_nc,
             "candidate_modes": [x.strip() for x in args.candidate_modes.split(",") if x.strip()],
             "execution_backend": args.execution_backend,
+            "streamed_preprocess": bool(args.streamed_preprocess),
+            "streamed_chunk_voxels": int(args.streamed_chunk_voxels),
+            "streamed_reservoir_size": int(args.streamed_reservoir_size),
+            "streamed_max_bins": int(args.streamed_max_bins),
+            "streamed_exact_log_limit": int(args.streamed_exact_log_limit),
+            "streamed_seed": int(args.streamed_seed),
             "save_sweep_artifacts": not bool(args.no_save_sweep_artifacts),
             "run_final": not bool(args.no_run_final),
         },
@@ -187,4 +205,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

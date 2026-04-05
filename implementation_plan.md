@@ -194,6 +194,30 @@ Phase 4 artifacts (streamed preprocessing):
   - streamed KL reports diagnostic mode and success state (`exact-kl`, `reservoir-kl`, or sanity-fail variants)
   - default behavior unchanged unless `--streamed-preprocess` is explicitly enabled
 
+Phase 4 benchmark/parity confirmation (agentic workflow profile):
+
+- Profile roots:
+  - `/tmp/agentic_phase4_nostream`
+  - `/tmp/agentic_phase4_stream`
+- Timing JSONs:
+  - `/tmp/agentic_phase4_nostream/timing_breakdown.json`
+  - `/tmp/agentic_phase4_stream/timing_breakdown.json`
+- Parity JSON:
+  - `/tmp/agentic_phase4_stream/parity_vs_nostream.json`
+- Settings used:
+  - input: `/tmp/xtec_small_stream.nxs`
+  - candidate-modes: `d`
+  - `min_nc=2`, `max_nc=4`
+  - `execution_backend=inprocess`
+  - unsliced input (`--slices ''`)
+  - streamed run: `--streamed-preprocess` (default chunk/reservoir settings)
+- Result summary:
+  - Recommendation parity: pass (`mode=d`, `n_clusters=3`)
+  - Final `results.h5` assignments parity: pass (`cluster_assignments_equal=true`, match ratio `1.0`)
+  - Wall time: `3.519s -> 2.890s` (`1.22x` speedup on this benchmark)
+  - Preprocess time reduced (`0.0269s -> 0.0010s`) in crosscut summary
+  - Keep/revert decision: **keep phase 4**
+
 ## Resume Instructions
 
 When resuming:
