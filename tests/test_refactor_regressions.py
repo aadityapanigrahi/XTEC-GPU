@@ -97,6 +97,18 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertIs(a, b)
             self.assertEqual(build_mock.call_count, 1)
 
+    def test_runtime_cache_reuses_s_mode_preprocessing(self) -> None:
+        # Guards Phase 3 optimization: s-mode preprocessing bundle is computed once.
+        args = SimpleNamespace(input="input.nxs", runtime_cache={})
+        cfg = CommonRunConfig(entry="entry/data", slices=":,0:1,-1:1,-1:1", threshold=True, device="cuda:1")
+        fake_data = object()
+        fake_bundle = (object(), object(), object())
+        with patch.object(xtec_cli, "_build_s_preprocessed", return_value=fake_bundle) as build_mock:
+            a = xtec_cli._get_or_build_s_preprocessed(args, fake_data, cfg, "cuda:1")
+            b = xtec_cli._get_or_build_s_preprocessed(args, fake_data, cfg, "cuda:1")
+            self.assertIs(a, b)
+            self.assertEqual(build_mock.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

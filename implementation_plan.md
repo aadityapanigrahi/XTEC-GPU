@@ -137,7 +137,7 @@ Commit:
 - [x] Phase 0 complete.
 - [x] Phase 1 complete.
 - [x] Phase 2 complete.
-- [ ] Phase 3 complete.
+- [x] Phase 3 complete.
 - [ ] Phase 4 complete (optional).
 
 Latest baseline artifacts:
@@ -167,6 +167,17 @@ Phase 2 artifacts:
   - BIC parity: pass
   - Final `results.h5` parity: pass
   - Wall time: `31.16s -> 30.24s` (`1.03x` incremental speedup)
+
+Phase 3 artifacts:
+
+- Run root: `/tmp/agentic_phase3_cuda_medium`
+- Timing JSON: `/tmp/agentic_phase3_cuda_medium/timing_breakdown.json`
+- Parity JSON vs Phase 2: `/tmp/agentic_phase3_cuda_medium/parity_vs_phase2.json`
+- Result summary:
+  - Recommendation parity: pass
+  - BIC parity: pass
+  - Final `results.h5` parity: pass
+  - Wall time: `30.24s -> 27.53s` (`1.10x` incremental speedup)
 
 ## Resume Instructions
 

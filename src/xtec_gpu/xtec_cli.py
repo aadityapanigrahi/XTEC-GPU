@@ -196,6 +196,32 @@ def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
     return runtime_cache[key]
 
 
+def _build_s_preprocessed(data, threshold_enabled: bool, device):
+    """Construct s-mode preprocessing bundle (threshold + peak averaging)."""
+    threshold = _build_threshold(data, threshold_enabled, device)
+    peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
+    return threshold, peak_avg, peak_avg.peak_avg_data
+
+
+def _get_or_build_s_preprocessed(args, data, common_cfg: CommonRunConfig, device):
+    """Reuse s-mode preprocessing bundle when shared runtime cache is present."""
+    runtime_cache = _runtime_cache_from_args(args)
+    if runtime_cache is None:
+        return _build_s_preprocessed(data, bool(common_cfg.threshold), device)
+
+    key = (
+        "preprocess_s",
+        args.input,
+        common_cfg.entry,
+        common_cfg.slices,
+        bool(common_cfg.threshold),
+        str(device),
+    )
+    if key not in runtime_cache:
+        runtime_cache[key] = _build_s_preprocessed(data, bool(common_cfg.threshold), device)
+    return runtime_cache[key]
+
+
 def _rescale(threshold, Data_thresh, rescale_text, device):
     """Apply rescaling; returns a torch tensor."""
     if rescale_text == "mean":
@@ -927,13 +953,9 @@ def run_xtec_s(args):
           f"rescale={common_cfg.rescale} | device={device}")
 
     t0 = time.time()
-    thresh_type = "KL" if common_cfg.threshold else "No threshold"
-    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
-    threshold = Threshold_Background(masked, threshold_type=thresh_type,
-                                     device=device)
-
-    Peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
-    Data_thresh = Peak_avg.peak_avg_data
+    threshold, Peak_avg, Data_thresh = _get_or_build_s_preprocessed(
+        args, data, common_cfg, device
+    )
 
     Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
 
@@ -1130,12 +1152,9 @@ def run_bic_s(args):
     print(f"[BIC XTEC-s] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
 
-    thresh_type = "KL" if common_cfg.threshold else "No threshold"
-    masked = Mask_Zeros(data.nxsignal.nxvalue, device=device)
-    threshold = Threshold_Background(masked, threshold_type=thresh_type,
-                                     device=device)
-    Peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
-    Data_thresh = Peak_avg.peak_avg_data
+    threshold, _peak_avg, Data_thresh = _get_or_build_s_preprocessed(
+        args, data, common_cfg, device
+    )
 
     Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
 
