@@ -1337,7 +1337,7 @@ def build_parser():
                          reorder_default=False,
                          random_state_help_suffix="None, matching the tutorial notebooks",
                          solver_mode_default="torchgmm",
-                         init_strategy_default="sklearn-kmeans",
+                         init_strategy_default="kmeans++",
                          post_stepwise_epochs_default=0)
     sp_td.add_argument("--pickle-name", default=None,
                        help="Optional filename for the final tutorial pickle")
