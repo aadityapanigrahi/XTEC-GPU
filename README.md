@@ -131,8 +131,11 @@ For automatic mode (`d` vs `s`) and cluster-count selection, use:
 python scripts/xtec_agentic_workflow.py data.nxs -o workflow_runs/run1 --device cuda:1
 ```
 
-If the recommended mode is `d`, the workflow uses `sklearn-kmeans` init by default.
+If the recommended mode is `d`, the workflow uses `kmeans++` init by default.
 By default, the workflow also materializes per-`k` sweep artifacts for manual oversight.
+Defaults use `kmeans++` initialization for `xtec-d` and `xtec-s`.
+For faithful replication against legacy/tutorial behavior, pass
+`--init-strategy-mode sklearn-kmeans`.
 
 Docs:
 
@@ -161,6 +164,7 @@ python scripts/xtec_workflow_mcp.py
 | `--min-nc` | `2` | Minimum cluster count in BIC sweep |
 | `--max-nc` | `14` | Maximum cluster count in BIC sweep |
 | `--candidate-modes` | `d,s` | Comma-separated candidate modes to evaluate |
+| `--init-strategy-mode` | `kmeans++` | Init strategy for `xtec-d`/`xtec-s` runs in the workflow |
 | `--random-state` | `0` | Random seed used for final `xtec-d` run |
 | `--no-run-final` | off | Skip final recommended command execution (recommendation-only mode) |
 | `--no-save-sweep-artifacts` | off | Skip per-`k` sweep artifact runs |
@@ -187,6 +191,7 @@ Each per-`k` directory includes:
 | `-o` | — | Output directory |
 | `-n` | `4` | Number of clusters |
 | `--rescale` | `mean` | `mean` / `z-score` / `log-mean` / `None` |
+| `--init-strategy-mode` | `kmeans++` | Cluster initialization strategy (`kmeans++`, `xtec`, `sklearn-kmeans`, `cuml-kmeans`) |
 | `--threshold` / `--no-threshold` | on | KL background thresholding |
 | `--device` | `auto` | Specify compute device (`auto`, `cuda`, `cuda:1`, `mps`, `cpu`) |
 | `--entry` | `entry/data` | HDF5 path in `.nxs` file |

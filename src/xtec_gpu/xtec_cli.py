@@ -1244,7 +1244,7 @@ def build_parser():
                              reorder_default=False,
                              random_state_help_suffix="",
                              solver_mode_default="torchgmm",
-                             init_strategy_default="sklearn-kmeans",
+                             init_strategy_default="kmeans++",
                              post_stepwise_epochs_default=0):
         sp.add_argument("--random-state", type=int, default=random_state_default,
                         help="Random seed for GMM initialization "
@@ -1293,7 +1293,7 @@ def build_parser():
                          reorder_default=True,
                          random_state_help_suffix="0 for xtec-d",
                          solver_mode_default="torchgmm",
-                         init_strategy_default="sklearn-kmeans",
+                         init_strategy_default="kmeans++",
                          post_stepwise_epochs_default=0)
     sp_d.set_defaults(func=run_xtec_d)
 
@@ -1341,7 +1341,7 @@ def build_parser():
                          reorder_default=True,
                          random_state_help_suffix="None for xtec-s",
                          solver_mode_default="torchgmm",
-                         init_strategy_default="sklearn-kmeans",
+                         init_strategy_default="kmeans++",
                          post_stepwise_epochs_default=0)
     sp_s.set_defaults(func=run_xtec_s)
 

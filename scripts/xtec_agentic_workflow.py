@@ -39,6 +39,7 @@ class RunConfig:
     random_state: int
     run_final: bool
     save_sweep_artifacts: bool
+    init_strategy_mode: str
 
 
 def _base_env(extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -145,6 +146,7 @@ def _run_xtec_d_with_init(
 def _run_xtec_s(
     cfg: RunConfig,
     n_clusters: int,
+    init_strategy: str,
     out_dir: Path,
     env: Dict[str, str],
 ) -> List[str]:
@@ -165,6 +167,8 @@ def _run_xtec_s(
         cfg.device,
         "-n",
         str(n_clusters),
+        "--init-strategy-mode",
+        init_strategy,
     ]
     if cfg.slices:
         cmd.extend(["--slices", cfg.slices])
@@ -188,7 +192,7 @@ def _run_sweep_artifacts_for_mode(
             cmd = _run_xtec_d_with_init(
                 cfg=cfg,
                 n_clusters=int(k),
-                init_strategy="sklearn-kmeans",
+                init_strategy=cfg.init_strategy_mode,
                 out_dir=run_dir,
                 env=env,
             )
@@ -196,6 +200,7 @@ def _run_sweep_artifacts_for_mode(
             cmd = _run_xtec_s(
                 cfg=cfg,
                 n_clusters=int(k),
+                init_strategy=cfg.init_strategy_mode,
                 out_dir=run_dir,
                 env=env,
             )
@@ -254,7 +259,7 @@ def recommend_workflow(cfg: RunConfig, extra_env: Optional[Dict[str, str]] = Non
             )
 
     recommended_mode = _recommend_mode(bic_results)
-    recommended_init = "sklearn-kmeans" if "d" in bic_results else None
+    recommended_init = cfg.init_strategy_mode if "d" in bic_results else None
 
     final_cmd: Optional[List[str]] = None
     if cfg.run_final:
@@ -263,7 +268,7 @@ def recommend_workflow(cfg: RunConfig, extra_env: Optional[Dict[str, str]] = Non
             final_cmd = _run_xtec_d_with_init(
                 cfg=cfg,
                 n_clusters=int(bic_results["d"]["best_k"]),
-                init_strategy=recommended_init or "sklearn-kmeans",
+                init_strategy=recommended_init or cfg.init_strategy_mode,
                 out_dir=final_root / "xtec_d",
                 env=env,
             )
@@ -304,6 +309,7 @@ def recommend_workflow(cfg: RunConfig, extra_env: Optional[Dict[str, str]] = Non
             "min_nc": cfg.min_nc,
             "max_nc": cfg.max_nc,
             "candidate_modes": list(cfg.candidate_modes),
+            "init_strategy_mode": cfg.init_strategy_mode,
             "random_state": cfg.random_state,
         },
         "bic_results": bic_results,
@@ -334,6 +340,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-nc", type=int, default=14)
     p.add_argument("--candidate-modes", default="d,s",
                    help="Comma-separated modes to evaluate: d,s")
+    p.add_argument(
+        "--init-strategy-mode",
+        choices=["kmeans++", "xtec", "sklearn-kmeans", "cuml-kmeans"],
+        default="kmeans++",
+        help="Initialization strategy passed to xtec-d/xtec-s runs (default: kmeans++).",
+    )
     p.add_argument("--random-state", type=int, default=0)
     p.add_argument("--no-run-final", dest="run_final", action="store_false", default=True,
                    help="Only compute recommendation, do not execute final command")
@@ -363,6 +375,7 @@ def main() -> None:
         random_state=int(args.random_state),
         run_final=bool(args.run_final),
         save_sweep_artifacts=bool(args.save_sweep_artifacts),
+        init_strategy_mode=str(args.init_strategy_mode),
     )
     report = recommend_workflow(cfg)
     print(json.dumps(report["recommendation"], indent=2))

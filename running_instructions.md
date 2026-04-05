@@ -47,8 +47,14 @@ Includes:
 - per-`k` sweep artifact runs (`results.h5`, `trajectories.png`, `qmap.png`, `avg_intensities.png`)
 - best `k` per mode
 - recommended mode + `n_clusters`
-- for `xtec-d`, init strategy defaults to `sklearn-kmeans`
+- for `xtec-d`, init strategy defaults to `kmeans++`
 - final command executed
+
+For faithful replication against legacy/tutorial behavior, pass:
+
+```bash
+--init-strategy-mode sklearn-kmeans
+```
 
 To skip generating sweep artifacts, add:
 
