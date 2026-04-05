@@ -1,8 +1,4 @@
-"""Shared run configuration models.
-
-These are additive scaffolding models for refactoring.
-They are not wired into runtime paths yet.
-"""
+"""Shared run configuration models used across CLI and workflows."""
 
 from __future__ import annotations
 
@@ -21,6 +17,12 @@ class CommonRunConfig:
     rescale: str = "mean"
     device: str = "auto"
     init_strategy_mode: str = "kmeans++"
+    streamed_preprocess: bool = False
+    streamed_chunk_voxels: int = 200000
+    streamed_reservoir_size: int = 500000
+    streamed_max_bins: int = 4096
+    streamed_exact_log_limit: int = 2000000
+    streamed_seed: int = 0
 
 
 @dataclass(frozen=True)

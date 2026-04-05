@@ -166,6 +166,9 @@ xtec-gpu label-smooth data.nxs -o results/ -n 4 --L-scale 0.05
 # BIC sweep
 xtec-gpu bic-d data.nxs -o results/ --min-nc 2 --max-nc 14
 xtec-gpu bic-s data.nxs -o results/ --min-nc 2 --max-nc 14
+
+# Optional: streamed preprocessing for large/full-data d-mode runs
+xtec-gpu bic-d data.nxs -o results/ --streamed-preprocess --streamed-chunk-voxels 200000
 ```
 
 ## Agentic Workflow + MCP
@@ -212,6 +215,12 @@ python scripts/xtec_workflow_mcp.py
 | `--init-strategy-mode` | `kmeans++` | Init strategy for `xtec-d`/`xtec-s` runs in the workflow |
 | `--random-state` | `0` | Random seed used for final `xtec-d` run |
 | `--execution-backend` | `inprocess` | `inprocess` (faster, same code path) or `subprocess` (process isolation) |
+| `--streamed-preprocess` | off | Opt-in streamed preprocessing for large/full-data d-mode paths (`bic-d`, `xtec-d`) |
+| `--streamed-chunk-voxels` | `200000` | Approximate spatial voxels per streamed slab |
+| `--streamed-reservoir-size` | `500000` | Reservoir sketch size for streamed quantile approximation |
+| `--streamed-max-bins` | `4096` | Maximum histogram bins in streamed KL cutoff estimation |
+| `--streamed-exact-log-limit` | `2000000` | Exact cutoff path when valid log-means stay below this count |
+| `--streamed-seed` | `0` | Random seed used by streamed reservoir sketch |
 | `--no-run-final` | off | Skip final recommended command execution (recommendation-only mode) |
 | `--no-save-sweep-artifacts` | off | Skip per-`k` sweep artifact runs |
 
@@ -238,6 +247,7 @@ Each per-`k` directory includes:
 | `-n` | `4` | Number of clusters |
 | `--rescale` | `mean` | `mean` / `z-score` / `log-mean` / `None` |
 | `--init-strategy-mode` | `kmeans++` | Cluster initialization strategy (`kmeans++`, `xtec`, `sklearn-kmeans`, `cuml-kmeans`) |
+| `--streamed-preprocess` | off | Enable streamed preprocessing (currently used by `xtec-d` and `bic-d`) |
 | `--threshold` / `--no-threshold` | on | KL background thresholding |
 | `--device` | `auto` | Specify compute device (`auto`, `cuda`, `cuda:1`, `mps`, `cpu`) |
 | `--entry` | `entry/data` | HDF5 path in `.nxs` file |

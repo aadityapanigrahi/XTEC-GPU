@@ -72,6 +72,12 @@ def _run_bic(
             threshold=bool(cfg.threshold),
             rescale=cfg.rescale,
             device=cfg.device,
+            streamed_preprocess=bool(cfg.streamed_preprocess),
+            streamed_chunk_voxels=int(cfg.streamed_chunk_voxels),
+            streamed_reservoir_size=int(cfg.streamed_reservoir_size),
+            streamed_max_bins=int(cfg.streamed_max_bins),
+            streamed_exact_log_limit=int(cfg.streamed_exact_log_limit),
+            streamed_seed=int(cfg.streamed_seed),
             min_nc=int(cfg.min_nc),
             max_nc=int(cfg.max_nc),
             runtime_cache=runtime_cache,
@@ -122,6 +128,12 @@ def _run_xtec_d_with_init(
             threshold=bool(cfg.threshold),
             rescale=cfg.rescale,
             device=cfg.device,
+            streamed_preprocess=bool(cfg.streamed_preprocess),
+            streamed_chunk_voxels=int(cfg.streamed_chunk_voxels),
+            streamed_reservoir_size=int(cfg.streamed_reservoir_size),
+            streamed_max_bins=int(cfg.streamed_max_bins),
+            streamed_exact_log_limit=int(cfg.streamed_exact_log_limit),
+            streamed_seed=int(cfg.streamed_seed),
             n_clusters=int(n_clusters),
             random_state=int(cfg.random_state),
             solver_mode="torchgmm",
@@ -165,6 +177,12 @@ def _run_xtec_s(
             threshold=bool(cfg.threshold),
             rescale=cfg.rescale,
             device=cfg.device,
+            streamed_preprocess=bool(cfg.streamed_preprocess),
+            streamed_chunk_voxels=int(cfg.streamed_chunk_voxels),
+            streamed_reservoir_size=int(cfg.streamed_reservoir_size),
+            streamed_max_bins=int(cfg.streamed_max_bins),
+            streamed_exact_log_limit=int(cfg.streamed_exact_log_limit),
+            streamed_seed=int(cfg.streamed_seed),
             n_clusters=int(n_clusters),
             random_state=None,
             solver_mode="torchgmm",
@@ -312,6 +330,12 @@ def recommend_workflow(
             "init_strategy_mode": cfg.init_strategy_mode,
             "random_state": cfg.random_state,
             "execution_backend": cfg.execution_backend,
+            "streamed_preprocess": cfg.streamed_preprocess,
+            "streamed_chunk_voxels": cfg.streamed_chunk_voxels,
+            "streamed_reservoir_size": cfg.streamed_reservoir_size,
+            "streamed_max_bins": cfg.streamed_max_bins,
+            "streamed_exact_log_limit": cfg.streamed_exact_log_limit,
+            "streamed_seed": cfg.streamed_seed,
         },
         "bic_results": bic_results,
         "sweep_artifacts": sweep_artifacts if cfg.save_sweep_artifacts else None,
@@ -342,6 +366,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-threshold", dest="threshold", action="store_false")
     p.add_argument("--rescale", choices=["mean", "z-score", "log-mean", "None"], default="mean")
     p.add_argument("--device", default="auto")
+    p.add_argument("--streamed-preprocess", action="store_true", default=False)
+    p.add_argument("--streamed-chunk-voxels", type=int, default=200000)
+    p.add_argument("--streamed-reservoir-size", type=int, default=500000)
+    p.add_argument("--streamed-max-bins", type=int, default=4096)
+    p.add_argument("--streamed-exact-log-limit", type=int, default=2000000)
+    p.add_argument("--streamed-seed", type=int, default=0)
     p.add_argument("--min-nc", type=int, default=2)
     p.add_argument("--max-nc", type=int, default=14)
     p.add_argument("--candidate-modes", default="d,s",
@@ -380,6 +410,12 @@ def config_from_args(args: argparse.Namespace) -> AgenticWorkflowConfig:
         threshold=bool(args.threshold),
         rescale=args.rescale,
         device=args.device,
+        streamed_preprocess=bool(args.streamed_preprocess),
+        streamed_chunk_voxels=int(args.streamed_chunk_voxels),
+        streamed_reservoir_size=int(args.streamed_reservoir_size),
+        streamed_max_bins=int(args.streamed_max_bins),
+        streamed_exact_log_limit=int(args.streamed_exact_log_limit),
+        streamed_seed=int(args.streamed_seed),
         min_nc=int(args.min_nc),
         max_nc=int(args.max_nc),
         candidate_modes=[x.strip() for x in args.candidate_modes.split(",") if x.strip()],

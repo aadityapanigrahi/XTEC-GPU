@@ -9,6 +9,7 @@ from unittest.mock import patch
 from xtec_gpu.config import AgenticWorkflowConfig
 from xtec_gpu.workflows import agentic
 from xtec_gpu.workflows import WORKFLOW_REPORT_REQUIRED_KEYS
+from xtec_gpu.workflows.shared import build_bic_command
 from xtec_gpu import xtec_cli
 from xtec_gpu.config.run_config import CommonRunConfig
 from xtec_gpu.xtec_cli import build_parser
@@ -106,6 +107,56 @@ class RefactorRegressionTests(unittest.TestCase):
         with patch.object(xtec_cli, "_build_s_preprocessed", return_value=fake_bundle) as build_mock:
             a = xtec_cli._get_or_build_s_preprocessed(args, fake_data, cfg, "cuda:1")
             b = xtec_cli._get_or_build_s_preprocessed(args, fake_data, cfg, "cuda:1")
+            self.assertIs(a, b)
+            self.assertEqual(build_mock.call_count, 1)
+
+    def test_cli_streamed_preprocess_defaults(self) -> None:
+        # Guards Phase 4 CLI defaults: opt-in only.
+        parser = build_parser()
+        args_d = parser.parse_args(["xtec-d", "in.nxs", "-o", "out"])
+        self.assertFalse(args_d.streamed_preprocess)
+        self.assertEqual(args_d.streamed_chunk_voxels, 200000)
+        self.assertEqual(args_d.streamed_reservoir_size, 500000)
+
+    def test_workflow_command_includes_streamed_flags_when_enabled(self) -> None:
+        # Guards Phase 4 subprocess parity: shared command builders carry streamed options.
+        cfg = AgenticWorkflowConfig(
+            input_path="input.nxs",
+            output_root=Path("."),
+            streamed_preprocess=True,
+            streamed_chunk_voxels=123,
+            streamed_reservoir_size=456,
+            streamed_max_bins=789,
+            streamed_exact_log_limit=111,
+            streamed_seed=7,
+        )
+        cmd = build_bic_command("d", "input.nxs", Path("out"), cfg)
+        self.assertIn("--streamed-preprocess", cmd)
+        self.assertIn("--streamed-chunk-voxels", cmd)
+        self.assertIn("123", cmd)
+        self.assertIn("--streamed-seed", cmd)
+        self.assertIn("7", cmd)
+
+    def test_runtime_cache_reuses_streamed_threshold_for_d_mode(self) -> None:
+        # Guards Phase 4 in-process caching for streamed d-mode preprocessing.
+        args = SimpleNamespace(input="input.nxs", runtime_cache={})
+        cfg = CommonRunConfig(
+            entry="entry/data",
+            slices=None,
+            threshold=True,
+            device="cpu",
+            streamed_preprocess=True,
+            streamed_chunk_voxels=32,
+            streamed_reservoir_size=64,
+            streamed_max_bins=128,
+            streamed_exact_log_limit=256,
+            streamed_seed=3,
+        )
+        fake_data = object()
+        fake_threshold = object()
+        with patch.object(xtec_cli, "_build_threshold_d", return_value=fake_threshold) as build_mock:
+            a = xtec_cli._get_or_build_threshold_d(args, fake_data, cfg, "cpu")
+            b = xtec_cli._get_or_build_threshold_d(args, fake_data, cfg, "cpu")
             self.assertIs(a, b)
             self.assertEqual(build_mock.call_count, 1)
 

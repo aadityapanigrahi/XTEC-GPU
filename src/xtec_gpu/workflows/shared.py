@@ -44,6 +44,20 @@ def _append_common_args(cmd: List[str], cfg: AgenticWorkflowConfig) -> None:
         cmd.extend(["--slices", cfg.slices])
     if not cfg.threshold:
         cmd.append("--no-threshold")
+    if bool(cfg.streamed_preprocess):
+        cmd.append("--streamed-preprocess")
+        cmd.extend([
+            "--streamed-chunk-voxels",
+            str(int(cfg.streamed_chunk_voxels)),
+            "--streamed-reservoir-size",
+            str(int(cfg.streamed_reservoir_size)),
+            "--streamed-max-bins",
+            str(int(cfg.streamed_max_bins)),
+            "--streamed-exact-log-limit",
+            str(int(cfg.streamed_exact_log_limit)),
+            "--streamed-seed",
+            str(int(cfg.streamed_seed)),
+        ])
 
 
 def build_bic_command(mode: str, input_path: str, output_dir: Path, cfg: AgenticWorkflowConfig) -> List[str]:

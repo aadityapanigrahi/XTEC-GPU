@@ -60,6 +60,7 @@ from .Preprocessing import (
 )
 from .GMM import GMM, GMM_kernels
 from .config import CommonRunConfig
+from .streamed_preprocessing import build_streamed_threshold_result
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,12 @@ def _common_config_from_args(args) -> CommonRunConfig:
         rescale=args.rescale,
         device=args.device,
         init_strategy_mode=getattr(args, "init_strategy_mode", "kmeans++"),
+        streamed_preprocess=bool(getattr(args, "streamed_preprocess", False)),
+        streamed_chunk_voxels=int(getattr(args, "streamed_chunk_voxels", 200000)),
+        streamed_reservoir_size=int(getattr(args, "streamed_reservoir_size", 500000)),
+        streamed_max_bins=int(getattr(args, "streamed_max_bins", 4096)),
+        streamed_exact_log_limit=int(getattr(args, "streamed_exact_log_limit", 2000000)),
+        streamed_seed=int(getattr(args, "streamed_seed", 0)),
     )
 
 
@@ -177,11 +184,40 @@ def _build_threshold(data, threshold_enabled: bool, device):
     return Threshold_Background(masked, threshold_type=thresh_type, device=device)
 
 
+def _build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
+    """Build d-mode thresholding, optionally using streamed preprocessing."""
+    use_stream = bool(getattr(common_cfg, "streamed_preprocess", False))
+    if not use_stream:
+        return _build_threshold(data, bool(common_cfg.threshold), device)
+
+    if common_cfg.slices not in (None, ""):
+        print("[XTEC-d] streamed preprocessing requested with --slices; "
+              "falling back to standard in-memory threshold path.")
+        return _build_threshold(data, bool(common_cfg.threshold), device)
+
+    print(
+        "[XTEC-d] using streamed preprocessing "
+        f"(chunk_voxels={common_cfg.streamed_chunk_voxels}, "
+        f"reservoir_size={common_cfg.streamed_reservoir_size})"
+    )
+    return build_streamed_threshold_result(
+        input_path=args.input,
+        entry_path=common_cfg.entry,
+        threshold_enabled=bool(common_cfg.threshold),
+        device=device,
+        chunk_voxels=int(common_cfg.streamed_chunk_voxels),
+        reservoir_size=int(common_cfg.streamed_reservoir_size),
+        max_bins=int(common_cfg.streamed_max_bins),
+        exact_log_limit=int(common_cfg.streamed_exact_log_limit),
+        seed=int(common_cfg.streamed_seed),
+    )
+
+
 def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
     """Reuse d-mode threshold preprocessing when a shared runtime cache is present."""
     runtime_cache = _runtime_cache_from_args(args)
     if runtime_cache is None:
-        return _build_threshold(data, bool(common_cfg.threshold), device)
+        return _build_threshold_d(args, data, common_cfg, device)
 
     key = (
         "threshold_d",
@@ -190,9 +226,15 @@ def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
         common_cfg.slices,
         bool(common_cfg.threshold),
         str(device),
+        bool(getattr(common_cfg, "streamed_preprocess", False)),
+        int(getattr(common_cfg, "streamed_chunk_voxels", 200000)),
+        int(getattr(common_cfg, "streamed_reservoir_size", 500000)),
+        int(getattr(common_cfg, "streamed_max_bins", 4096)),
+        int(getattr(common_cfg, "streamed_exact_log_limit", 2000000)),
+        int(getattr(common_cfg, "streamed_seed", 0)),
     )
     if key not in runtime_cache:
-        runtime_cache[key] = _build_threshold(data, bool(common_cfg.threshold), device)
+        runtime_cache[key] = _build_threshold_d(args, data, common_cfg, device)
     return runtime_cache[key]
 
 
@@ -1309,6 +1351,48 @@ def build_parser():
                         help="Rescaling method (default: mean)")
         sp.add_argument("--device", default="auto", type=str,
                         help="Compute device: 'auto', 'cpu', 'cuda', 'cuda:1', 'mps' (default: 'auto')")
+        sp.add_argument(
+            "--streamed-preprocess",
+            action="store_true",
+            default=False,
+            help="Opt-in streamed preprocessing for large full-data d-mode runs "
+                 "(currently used by xtec-d/bic-d; default: off).",
+        )
+        sp.add_argument(
+            "--streamed-chunk-voxels",
+            type=int,
+            default=200000,
+            help="Approximate number of spatial voxels per streamed slab "
+                 "(default: 200000).",
+        )
+        sp.add_argument(
+            "--streamed-reservoir-size",
+            type=int,
+            default=500000,
+            help="Reservoir sketch capacity used for approximate quantiles in "
+                 "streamed KL cutoff estimation (default: 500000).",
+        )
+        sp.add_argument(
+            "--streamed-max-bins",
+            type=int,
+            default=4096,
+            help="Maximum histogram bins in streamed KL cutoff estimation "
+                 "(default: 4096).",
+        )
+        sp.add_argument(
+            "--streamed-exact-log-limit",
+            type=int,
+            default=2000000,
+            help="If valid log-mean count stays below this limit, streamed KL "
+                 "uses exact quantiles instead of reservoir approximation "
+                 "(default: 2000000).",
+        )
+        sp.add_argument(
+            "--streamed-seed",
+            type=int,
+            default=0,
+            help="Random seed for streamed reservoir sampling (default: 0).",
+        )
 
     def _add_gmm_parity_args(sp, random_state_default=None,
                              reorder_default=False,

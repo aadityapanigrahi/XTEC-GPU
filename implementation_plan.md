@@ -125,7 +125,7 @@ Change scope:
 
 Status:
 
-- Planned; not required for reuse-cache phases.
+- Completed (opt-in path).
 
 Commit:
 
@@ -138,7 +138,7 @@ Commit:
 - [x] Phase 1 complete.
 - [x] Phase 2 complete.
 - [x] Phase 3 complete.
-- [ ] Phase 4 complete (optional).
+- [x] Phase 4 complete (optional).
 
 Latest baseline artifacts:
 
@@ -178,6 +178,21 @@ Phase 3 artifacts:
   - BIC parity: pass
   - Final `results.h5` parity: pass
   - Wall time: `30.24s -> 27.53s` (`1.10x` incremental speedup)
+
+Phase 4 artifacts (streamed preprocessing):
+
+- New module:
+  - `src/xtec_gpu/streamed_preprocessing.py`
+- Validation outputs:
+  - `/tmp/bic_std_phase4b/bic_xtec_d.h5`
+  - `/tmp/bic_stream_phase4b/bic_xtec_d.h5`
+  - `/tmp/xtecd_std_phase4/results.h5`
+  - `/tmp/xtecd_stream_phase4/results.h5`
+- Result summary (synthetic unsliced NeXus smoke test):
+  - `bic-d` parity (`allclose`, including `NaN` handling): pass
+  - `xtec-d` `results.h5` parity: pass (`cluster_*`, `data_indices`, `data_thresholded`)
+  - streamed KL reports diagnostic mode and success state (`exact-kl`, `reservoir-kl`, or sanity-fail variants)
+  - default behavior unchanged unless `--streamed-preprocess` is explicitly enabled
 
 ## Resume Instructions
 

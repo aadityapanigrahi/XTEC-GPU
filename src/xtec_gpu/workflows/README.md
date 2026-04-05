@@ -21,6 +21,21 @@ Scripts in `scripts/` provide command entry points for these workflows.
 Use `--execution-backend inprocess|subprocess` with
 `scripts/xtec_agentic_workflow.py`.
 
+## Streamed Preprocessing (Optional)
+
+For large/full-data `d`-mode runs, agentic workflows can enable streamed
+threshold preprocessing via:
+
+- `--streamed-preprocess`
+- `--streamed-chunk-voxels`
+- `--streamed-reservoir-size`
+- `--streamed-max-bins`
+- `--streamed-exact-log-limit`
+- `--streamed-seed`
+
+This keeps default behavior unchanged (feature is opt-in) and is currently
+wired to `bic-d` / `xtec-d` pathways.
+
 ## Benchmark Notes
 
 On `/data/XTEC_GPU/test_dataset/srn0_XTEC.nxs` (GPU: `cuda:1`) with:
