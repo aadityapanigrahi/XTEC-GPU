@@ -135,7 +135,7 @@ Commit:
 
 - [x] Plan file created.
 - [x] Phase 0 complete.
-- [ ] Phase 1 complete.
+- [x] Phase 1 complete.
 - [ ] Phase 2 complete.
 - [ ] Phase 3 complete.
 - [ ] Phase 4 complete (optional).
@@ -145,6 +145,17 @@ Latest baseline artifacts:
 - Baseline run root: `/tmp/agentic_phase0_baseline_cuda_medium`
 - Timing JSON: `/tmp/agentic_phase0_baseline_cuda_medium/timing_breakdown.json`
 - Self-check parity JSON: `/tmp/agentic_phase0_baseline_cuda_medium/parity_selfcheck.json`
+
+Phase 1 artifacts:
+
+- Run root: `/tmp/agentic_phase1_cuda_medium`
+- Timing JSON: `/tmp/agentic_phase1_cuda_medium/timing_breakdown.json`
+- Parity JSON vs baseline: `/tmp/agentic_phase1_cuda_medium/parity_vs_phase0.json`
+- Result summary:
+  - Recommendation parity: pass
+  - BIC parity: pass
+  - Final `results.h5` parity: pass
+  - Wall time: `125.14s -> 31.16s` (`4.02x` speedup on this benchmark)
 
 ## Resume Instructions
 

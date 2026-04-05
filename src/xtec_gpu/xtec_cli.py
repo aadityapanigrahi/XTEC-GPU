@@ -43,6 +43,7 @@ import os
 import pickle
 import sys
 import time
+from typing import Any, Dict, Optional
 
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for CLI
@@ -149,6 +150,24 @@ def _load_data(filepath, entry_path, slices):
         data = data[tuple(slice_objs)]
 
     return data
+
+
+def _runtime_cache_from_args(args) -> Optional[Dict[Any, Any]]:
+    """Return optional runtime cache dict passed by in-process workflows."""
+    cache = getattr(args, "runtime_cache", None)
+    return cache if isinstance(cache, dict) else None
+
+
+def _get_or_load_data(args, entry_path, slices):
+    """Load NXdata once per shared runtime cache key, or pass through uncached."""
+    runtime_cache = _runtime_cache_from_args(args)
+    if runtime_cache is None:
+        return _load_data(args.input, entry_path, slices)
+
+    key = ("nxdata", args.input, entry_path, slices)
+    if key not in runtime_cache:
+        runtime_cache[key] = _load_data(args.input, entry_path, slices)
+    return runtime_cache[key]
 
 
 def _rescale(threshold, Data_thresh, rescale_text, device):
@@ -615,7 +634,7 @@ def _plot_avg_intensities(data, Data_thresh, cluster_assigns, nc, outdir,
 def run_xtec_d(args):
     """XTEC-d: direct GMM clustering (torchgmm, GPU preprocessing)."""
     common_cfg = _common_config_from_args(args)
-    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
     nc = args.n_clusters
 
@@ -668,7 +687,7 @@ def run_xtec_d(args):
 
 def run_tutorial_d(args):
     """Tutorial-faithful XTEC-d workflow mirroring the reference notebooks."""
-    data = _load_data(args.input, args.entry, args.slices)
+    data = _get_or_load_data(args, args.entry, args.slices)
     device = _get_device(args.device)
     first_nc = args.first_pass_clusters
 
@@ -877,7 +896,7 @@ def run_tutorial_d(args):
 def run_xtec_s(args):
     """XTEC-s: peak-averaged GMM clustering (GPU via torchgmm)."""
     common_cfg = _common_config_from_args(args)
-    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
     nc = args.n_clusters
 
@@ -945,7 +964,7 @@ def run_xtec_s(args):
 def run_label_smooth(args):
     """XTEC label smooth: GMM with Markov label smoothing (GPU)."""
     common_cfg = _common_config_from_args(args)
-    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
     nc = args.n_clusters
 
@@ -1033,7 +1052,7 @@ def run_label_smooth(args):
 def run_bic_d(args):
     """BIC score sweep for XTEC-d (torchgmm)."""
     common_cfg = _common_config_from_args(args)
-    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
 
     print(f"[BIC XTEC-d] nc={args.min_nc}..{args.max_nc} | "
@@ -1085,7 +1104,7 @@ def run_bic_d(args):
 def run_bic_s(args):
     """BIC score sweep for XTEC-s (peak averaging, torchgmm)."""
     common_cfg = _common_config_from_args(args)
-    data = _load_data(args.input, common_cfg.entry, common_cfg.slices)
+    data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
 
     print(f"[BIC XTEC-s] nc={args.min_nc}..{args.max_nc} | "

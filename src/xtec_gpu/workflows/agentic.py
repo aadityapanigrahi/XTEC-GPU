@@ -54,7 +54,13 @@ def _load_bic(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     return ks, bics
 
 
-def _run_bic(mode: str, cfg: AgenticWorkflowConfig, output_dir: Path, env: Dict[str, str]) -> Dict[str, object]:
+def _run_bic(
+    mode: str,
+    cfg: AgenticWorkflowConfig,
+    output_dir: Path,
+    env: Dict[str, str],
+    runtime_cache: Optional[Dict[object, object]] = None,
+) -> Dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_bic_command(mode=mode, input_path=cfg.input_path, output_dir=output_dir, cfg=cfg)
     if cfg.execution_backend == "inprocess":
@@ -68,6 +74,7 @@ def _run_bic(mode: str, cfg: AgenticWorkflowConfig, output_dir: Path, env: Dict[
             device=cfg.device,
             min_nc=int(cfg.min_nc),
             max_nc=int(cfg.max_nc),
+            runtime_cache=runtime_cache,
         )
         if mode == "d":
             xtec_cli.run_bic_d(bic_args)
@@ -95,6 +102,7 @@ def _run_xtec_d_with_init(
     init_strategy: str,
     out_dir: Path,
     env: Dict[str, str],
+    runtime_cache: Optional[Dict[object, object]] = None,
 ) -> List[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_xtec_d_command(
@@ -124,6 +132,7 @@ def _run_xtec_d_with_init(
             max_batch_epoch=50,
             max_full_epoch=500,
             reorder_clusters=True,
+            runtime_cache=runtime_cache,
         )
         xtec_cli.run_xtec_d(run_args)
     else:
@@ -137,6 +146,7 @@ def _run_xtec_s(
     init_strategy: str,
     out_dir: Path,
     env: Dict[str, str],
+    runtime_cache: Optional[Dict[object, object]] = None,
 ) -> List[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_xtec_s_command(
@@ -165,6 +175,7 @@ def _run_xtec_s(
             max_batch_epoch=50,
             max_full_epoch=500,
             reorder_clusters=True,
+            runtime_cache=runtime_cache,
         )
         xtec_cli.run_xtec_s(run_args)
     else:
@@ -178,6 +189,7 @@ def _run_sweep_artifacts_for_mode(
     ks: Sequence[int],
     sweep_root: Path,
     env: Dict[str, str],
+    runtime_cache: Optional[Dict[object, object]] = None,
 ) -> List[Dict[str, object]]:
     artifacts: List[Dict[str, object]] = []
     for k in ks:
@@ -189,6 +201,7 @@ def _run_sweep_artifacts_for_mode(
                 init_strategy=cfg.init_strategy_mode,
                 out_dir=run_dir,
                 env=env,
+                runtime_cache=runtime_cache,
             )
         else:
             cmd = _run_xtec_s(
@@ -197,6 +210,7 @@ def _run_sweep_artifacts_for_mode(
                 init_strategy=cfg.init_strategy_mode,
                 out_dir=run_dir,
                 env=env,
+                runtime_cache=runtime_cache,
             )
         artifacts.append(
             {
@@ -237,6 +251,7 @@ def recommend_workflow(
     sweep_artifacts_root = cfg.output_root / "sweep_artifacts"
     final_root = cfg.output_root / "final_run"
     bic_root.mkdir(parents=True, exist_ok=True)
+    runtime_cache: Optional[Dict[object, object]] = {} if cfg.execution_backend == "inprocess" else None
 
     bic_results: Dict[str, Dict[str, object]] = {}
     sweep_artifacts: Dict[str, List[Dict[str, object]]] = {}
@@ -244,7 +259,7 @@ def recommend_workflow(
         mode = mode.strip().lower()
         if mode not in {"d", "s"}:
             continue
-        mode_bic = _run_bic(mode, cfg, bic_root / f"bic_{mode}", env)
+        mode_bic = _run_bic(mode, cfg, bic_root / f"bic_{mode}", env, runtime_cache=runtime_cache)
         bic_results[mode] = mode_bic
         if cfg.save_sweep_artifacts:
             sweep_artifacts[mode] = _run_sweep_artifacts_for_mode(
@@ -253,6 +268,7 @@ def recommend_workflow(
                 ks=[int(x) for x in mode_bic["n_clusters"]],
                 sweep_root=sweep_artifacts_root / mode,
                 env=env,
+                runtime_cache=runtime_cache,
             )
 
     recommended_mode = _recommend_mode(bic_results)
@@ -268,16 +284,17 @@ def recommend_workflow(
                 init_strategy=recommended_init or cfg.init_strategy_mode,
                 out_dir=final_root / "xtec_d",
                 env=env,
+                runtime_cache=runtime_cache,
             )
         else:
-            cmd = build_xtec_s_command(
-                input_path=cfg.input_path,
-                output_dir=final_root / "xtec_s",
+            cmd = _run_xtec_s(
                 cfg=cfg,
                 n_clusters=int(bic_results["s"]["best_k"]),
                 init_strategy=cfg.init_strategy_mode,
+                out_dir=final_root / "xtec_s",
+                env=env,
+                runtime_cache=runtime_cache,
             )
-            run_checked(cmd, env=env)
             final_cmd = cmd
 
     report: WorkflowReport = {

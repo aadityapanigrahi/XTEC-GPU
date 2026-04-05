@@ -3,11 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from xtec_gpu.config import AgenticWorkflowConfig
 from xtec_gpu.workflows import agentic
 from xtec_gpu.workflows import WORKFLOW_REPORT_REQUIRED_KEYS
+from xtec_gpu import xtec_cli
 from xtec_gpu.xtec_cli import build_parser
 
 
@@ -73,6 +75,15 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertEqual(report["recommendation"]["mode"], "d")
             self.assertEqual(report["recommendation"]["n_clusters"], 3)
             self.assertIsNone(report["final_command"])
+
+    def test_runtime_cache_reuses_loaded_nxdata(self) -> None:
+        # Guards Phase 1 optimization: repeated in-process calls should reuse NXdata.
+        args = SimpleNamespace(input="input.nxs", runtime_cache={})
+        with patch.object(xtec_cli, "_load_data", return_value=object()) as load_mock:
+            a = xtec_cli._get_or_load_data(args, "entry/data", ":,0:1,-1:1,-1:1")
+            b = xtec_cli._get_or_load_data(args, "entry/data", ":,0:1,-1:1,-1:1")
+            self.assertIs(a, b)
+            self.assertEqual(load_mock.call_count, 1)
 
 
 if __name__ == "__main__":
