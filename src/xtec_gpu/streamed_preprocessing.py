@@ -1,6 +1,6 @@
 """Streamed preprocessing helpers for large NX datasets.
 
-This module provides an opt-in thresholding path for XTEC-d style workflows
+This module provides opt-in streamed preprocessing paths for XTEC workflows
 that need to process large datasets without materializing the full input
 volume in memory.
 """
@@ -14,6 +14,7 @@ from typing import Dict, Iterator, List, Sequence, Tuple
 import h5py
 import numpy as np
 import torch
+from scipy import ndimage
 
 from .Preprocessing import Threshold_Background
 
@@ -188,6 +189,162 @@ class StreamedThresholdResult:
         self.streaming = dict(diagnostics)
 
 
+class StreamedPeakAveraging:
+    """Peak-averaging container compatible with GMM.Get_pixel_labels."""
+
+    def __init__(
+        self,
+        *,
+        peak_avg_data: torch.Tensor,
+        peak_avg_ind_list: List[torch.Tensor],
+        peak_max_data: torch.Tensor,
+        peak_max_ind_list: List[torch.Tensor],
+        diagnostics: Dict[str, object],
+    ) -> None:
+        self.peak_avg_data = peak_avg_data
+        self.peak_avg_ind_list = peak_avg_ind_list
+        self.peak_max_data = peak_max_data
+        self.peak_max_ind_list = peak_max_ind_list
+        self.streaming = dict(diagnostics)
+
+
+def _structure_element_for_spatial_dims(ndim: int) -> np.ndarray:
+    if ndim == 2:
+        return np.ones((3, 3), dtype=np.uint8)
+    if ndim == 3:
+        return np.ones((3, 3, 3), dtype=np.uint8)
+    raise ValueError(
+        "Streamed peak averaging supports only 2D/3D spatial data. "
+        f"Got ndim={ndim}."
+    )
+
+
+def _component_labels_from_sparse_indices(
+    ind_thresholded_np: np.ndarray,
+    spatial_shape: Sequence[int],
+) -> Tuple[np.ndarray, int]:
+    if ind_thresholded_np.size == 0:
+        return np.empty((0,), dtype=np.int64), 0
+    if ind_thresholded_np.ndim != 2:
+        raise ValueError(
+            "Expected thresholded indices with shape (N, D). "
+            f"Got shape={ind_thresholded_np.shape}."
+        )
+    if ind_thresholded_np.shape[1] != len(spatial_shape):
+        raise ValueError(
+            "Threshold index dimensionality does not match spatial shape. "
+            f"indices D={ind_thresholded_np.shape[1]}, spatial D={len(spatial_shape)}."
+        )
+
+    structure = _structure_element_for_spatial_dims(len(spatial_shape))
+    thresholded_mask = np.zeros(tuple(int(x) for x in spatial_shape), dtype=bool)
+    thresholded_mask[tuple(ind_thresholded_np.T)] = True
+    labeled_array, num_features = ndimage.label(thresholded_mask, structure=structure)
+
+    labels_1_based = labeled_array[tuple(ind_thresholded_np.T)]
+    if np.any(labels_1_based <= 0):
+        raise RuntimeError(
+            "Connected-component labeling produced unlabeled thresholded points."
+        )
+    labels_0_based = labels_1_based.astype(np.int64, copy=False) - 1
+    return labels_0_based, int(num_features)
+
+
+def build_streamed_peak_averaging(
+    threshold_result: StreamedThresholdResult,
+) -> StreamedPeakAveraging:
+    """Compute peak-averaged trajectories from streamed threshold outputs.
+
+    This reproduces the connected-component semantics of Peak_averaging while
+    avoiding full intensity-volume materialization.
+    """
+
+    data_thresholded = threshold_result.data_thresholded
+    ind_thresholded = threshold_result.ind_thresholded
+    device = data_thresholded.device
+    dtype = data_thresholded.dtype
+    n_temp = int(data_thresholded.shape[0])
+    spatial_shape = tuple(int(x) for x in threshold_result.data_shape_orig[1:])
+
+    ind_thresholded_np = (
+        ind_thresholded.detach().cpu().numpy().astype(np.int64, copy=False)
+        if torch.is_tensor(ind_thresholded)
+        else np.asarray(ind_thresholded, dtype=np.int64)
+    )
+
+    labels_0_based, num_features = _component_labels_from_sparse_indices(
+        ind_thresholded_np,
+        spatial_shape,
+    )
+
+    if num_features == 0:
+        empty = torch.empty((n_temp, 0), device=device, dtype=dtype)
+        diagnostics = {
+            "num_peaks": 0,
+            "spatial_dims": len(spatial_shape),
+        }
+        return StreamedPeakAveraging(
+            peak_avg_data=empty,
+            peak_avg_ind_list=[],
+            peak_max_data=empty,
+            peak_max_ind_list=[],
+            diagnostics=diagnostics,
+        )
+
+    labels_t = torch.as_tensor(labels_0_based, device=device, dtype=torch.long)
+    data_nt = data_thresholded.transpose(0, 1).contiguous()  # (N, T)
+
+    peak_sum_nt = torch.zeros((num_features, n_temp), device=device, dtype=dtype)
+    peak_sum_nt.index_add_(0, labels_t, data_nt)
+    peak_counts = torch.bincount(labels_t, minlength=num_features).to(dtype).clamp_min(1)
+    peak_avg_data = (peak_sum_nt / peak_counts.unsqueeze(1)).transpose(0, 1).contiguous()
+
+    # Preserve peak_max_data field parity with Peak_averaging.
+    neg_inf = (
+        torch.finfo(dtype).min
+        if torch.is_floating_point(data_nt)
+        else float(torch.iinfo(dtype).min)
+    )
+    peak_max_nt = torch.full((num_features, n_temp), neg_inf, device=device, dtype=dtype)
+    peak_label_expand = labels_t.unsqueeze(1).expand(-1, n_temp)
+    peak_max_nt.scatter_reduce_(
+        0,
+        peak_label_expand,
+        data_nt,
+        reduce="amax",
+        include_self=True,
+    )
+    peak_max_data = peak_max_nt.transpose(0, 1).contiguous()
+
+    flat_inds = np.ravel_multi_index(ind_thresholded_np.T, dims=spatial_shape)
+    sort_order = np.lexsort((flat_inds, labels_0_based))
+    sorted_inds = ind_thresholded_np[sort_order]
+    sorted_labels = labels_0_based[sort_order]
+    counts = np.bincount(sorted_labels, minlength=num_features)
+    split_points = np.cumsum(counts[:-1], dtype=np.int64)
+    split_inds = (
+        np.split(sorted_inds, split_points.tolist())
+        if num_features > 1
+        else [sorted_inds]
+    )
+    peak_avg_ind_list = [
+        torch.as_tensor(arr, device=device, dtype=torch.long) for arr in split_inds
+    ]
+    peak_max_ind_list = list(peak_avg_ind_list)
+
+    diagnostics = {
+        "num_peaks": int(num_features),
+        "spatial_dims": len(spatial_shape),
+    }
+    return StreamedPeakAveraging(
+        peak_avg_data=peak_avg_data,
+        peak_avg_ind_list=peak_avg_ind_list,
+        peak_max_data=peak_max_data,
+        peak_max_ind_list=peak_max_ind_list,
+        diagnostics=diagnostics,
+    )
+
+
 def _estimate_cutoff(
     dataset: h5py.Dataset,
     *,
@@ -238,7 +395,7 @@ def _estimate_cutoff(
         sumsq_log += float(np.square(log_vals).sum())
         min_log = min(min_log, float(log_vals.min()))
         max_log = max(max_log, float(log_vals.max()))
-        exact_logs.append(log_vals.copy())
+        exact_logs.append(log_vals)
         if int(exact_log_limit) > 0 and n_valid > int(exact_log_limit):
             raise RuntimeError(
                 "Streamed exact cutoff exceeded --streamed-exact-log-limit. "
@@ -314,6 +471,7 @@ def build_streamed_threshold_result(
     max_bins: int = 4_096,
     exact_log_limit: int = 2_000_000,
     seed: int = 0,
+    collect_indices: bool = True,
 ) -> StreamedThresholdResult:
     """Build threshold outputs for d-mode using streamed slab reads.
 
@@ -344,7 +502,8 @@ def build_streamed_threshold_result(
         )
 
         data_chunks: List[np.ndarray] = []
-        ind_chunks: List[np.ndarray] = []
+        flat_ind_chunks: List[np.ndarray] = []
+        ind_chunks: List[np.ndarray] | None = [] if bool(collect_indices) else None
         spatial_shape = shape[1:]
         for starts, spatial_slices in _iter_spatial_chunks(spatial_shape, int(resolved_chunk_voxels)):
             block = _read_block_full_temperature(signal_ds, spatial_slices)
@@ -365,11 +524,38 @@ def build_streamed_threshold_result(
             local_idx = np.argwhere(pass_mask)
             if local_idx.size > 0:
                 starts_arr = np.asarray(starts, dtype=np.int64).reshape(1, -1)
-                ind_chunks.append((local_idx.astype(np.int64, copy=False) + starts_arr))
+                global_idx = local_idx.astype(np.int64, copy=False) + starts_arr
+                flat_ind_chunks.append(
+                    np.ravel_multi_index(global_idx.T, dims=spatial_shape).astype(np.int64, copy=False)
+                )
+                if ind_chunks is not None:
+                    ind_chunks.append(global_idx)
 
         if data_chunks:
             data_thresholded_np = np.concatenate(data_chunks, axis=1)
-            ind_thresholded_np = np.concatenate(ind_chunks, axis=0) if ind_chunks else np.empty((0, len(shape) - 1))
+            flat_inds_np = (
+                np.concatenate(flat_ind_chunks, axis=0)
+                if flat_ind_chunks
+                else np.empty((0,), dtype=np.int64)
+            )
+            if ind_chunks is not None:
+                ind_thresholded_np = (
+                    np.concatenate(ind_chunks, axis=0)
+                    if ind_chunks
+                    else np.empty((0, len(shape) - 1), dtype=np.int64)
+                )
+            else:
+                ind_thresholded_np = np.empty((0, len(shape) - 1), dtype=np.int64)
+
+            # Match CPU preprocessing ordering exactly: flatten spatial indices in
+            # C-order and keep thresholded trajectories in that global order.
+            # Without this, chunk traversal can permute points and introduce
+            # small downstream drift in BIC/EM despite identical threshold sets.
+            if bool(threshold_enabled) and flat_inds_np.size > 1:
+                order = np.argsort(flat_inds_np, kind="stable")
+                data_thresholded_np = data_thresholded_np[:, order]
+                if ind_thresholded_np.size > 0:
+                    ind_thresholded_np = ind_thresholded_np[order]
         else:
             data_thresholded_np = np.empty((shape[0], 0), dtype=np.float64)
             ind_thresholded_np = np.empty((0, len(shape) - 1), dtype=np.int64)
@@ -377,6 +563,11 @@ def build_streamed_threshold_result(
     data_thresholded = torch.as_tensor(data_thresholded_np, device=target_device)
     ind_thresholded = torch.as_tensor(ind_thresholded_np, device=target_device, dtype=torch.long)
     resolved_chunk_shape = _chunk_shape(shape[1:], int(resolved_chunk_voxels))
+    chunks_per_axis = [
+        int(np.ceil(float(dim) / float(max(1, cdim))))
+        for dim, cdim in zip(shape[1:], resolved_chunk_shape)
+    ]
+    n_streaming_chunks = int(np.prod(np.asarray(chunks_per_axis, dtype=np.int64)))
     est_chunk_voxels = int(np.prod(np.asarray(resolved_chunk_shape, dtype=np.int64)))
     est_chunk_bytes = int(shape[0]) * est_chunk_voxels * np.dtype(np.float64).itemsize
     diagnostics: Dict[str, object] = {
@@ -391,9 +582,12 @@ def build_streamed_threshold_result(
         "chunk_voxels": int(resolved_chunk_voxels),
         "chunk_auto_1gib": bool(chunk_auto),
         "chunk_shape": [int(x) for x in resolved_chunk_shape],
+        "chunks_per_axis": chunks_per_axis,
+        "n_streaming_chunks": int(n_streaming_chunks),
         "estimated_chunk_bytes": int(est_chunk_bytes),
         "reservoir_size": int(reservoir_size),
         "exact_log_limit": int(exact_log_limit),
+        "collect_indices": bool(collect_indices),
         "cutoff_compute_device": str(target_device),
         "approx_iqr": (
             float(cutoff_stats.approx_iqr)
@@ -424,3 +618,32 @@ def build_streamed_threshold_result(
         ind_thresholded=ind_thresholded,
         diagnostics=diagnostics,
     )
+
+
+def build_streamed_s_preprocessed(
+    *,
+    input_path: str,
+    entry_path: str,
+    threshold_enabled: bool,
+    device: torch.device | str,
+    chunk_voxels: int = 0,
+    reservoir_size: int = 500_000,
+    max_bins: int = 4_096,
+    exact_log_limit: int = 2_000_000,
+    seed: int = 0,
+) -> Tuple[StreamedThresholdResult, StreamedPeakAveraging, torch.Tensor]:
+    """Build streamed preprocessing bundle for XTEC-s workflows."""
+
+    threshold = build_streamed_threshold_result(
+        input_path=input_path,
+        entry_path=entry_path,
+        threshold_enabled=threshold_enabled,
+        device=device,
+        chunk_voxels=chunk_voxels,
+        reservoir_size=reservoir_size,
+        max_bins=max_bins,
+        exact_log_limit=exact_log_limit,
+        seed=seed,
+    )
+    peak_avg = build_streamed_peak_averaging(threshold)
+    return threshold, peak_avg, peak_avg.peak_avg_data

@@ -1032,30 +1032,63 @@ class GMM(object):
         """
         Peak_avg_data = Peak_avg.peak_avg_data
         Peak_avg_ind_list = Peak_avg.peak_avg_ind_list
+        num_peaks = int(Peak_avg_data.shape[1])
+        if num_peaks == 0:
+            self.Data_ind = np.empty((0, 0), dtype=np.int64)
+            self.Pixel_assignments = np.empty((0,), dtype=np.int64)
+            return
 
-        Data_ind = []
-        Pixel_assignments = []
+        n_groups = min(int(len(Peak_avg_ind_list)), num_peaks)
+        if n_groups == 0:
+            self.Data_ind = np.empty((0, 0), dtype=np.int64)
+            self.Pixel_assignments = np.empty((0,), dtype=np.int64)
+            return
+        peak_labels = np.asarray(self.cluster_assignments[:n_groups], dtype=np.int64)
+        Peak_avg_ind_list = Peak_avg_ind_list[:n_groups]
 
-        # For each peak, assign its label to all of its member pixels.
-        # The label for a peak is taken from the hard assignment of the
-        # corresponding peak-average trajectory (column index).
-        num_peaks = Peak_avg_data.shape[1]
-        for i in range(num_peaks):
-            inds_i = Peak_avg_ind_list[i]  # (n_i, D) tensor/ndarray
-            if torch.is_tensor(inds_i):
-                inds_i_np = inds_i.detach().cpu().numpy()
-            else:
-                inds_i_np = np.asarray(inds_i)
-            Data_ind.append(inds_i_np)
-            # cluster_assignments is over samples (rows in data); here we map
-            # the i-th peak-average trajectory's label to all its pixels.
-            Pixel_assignments.append(
-                np.full((inds_i_np.shape[0],), self.cluster_assignments[i], dtype=int)
+        all_torch = all(torch.is_tensor(inds) for inds in Peak_avg_ind_list)
+        if all_torch:
+            lengths = torch.as_tensor(
+                [int(inds.shape[0]) for inds in Peak_avg_ind_list],
+                dtype=torch.long,
+                device=Peak_avg_ind_list[0].device,
             )
+            total = int(lengths.sum().item())
+            if total == 0:
+                dim = int(Peak_avg_ind_list[0].shape[1]) if Peak_avg_ind_list[0].ndim == 2 else 0
+                self.Data_ind = np.empty((0, dim), dtype=np.int64)
+                self.Pixel_assignments = np.empty((0,), dtype=np.int64)
+                return
 
-        self.Data_ind = np.vstack(Data_ind) if Data_ind else np.empty((0, 0), dtype=int)
-        self.Pixel_assignments = np.concatenate(Pixel_assignments, axis=0) if Pixel_assignments else np.empty((0,),
-                                                                                                              dtype=int)
+            data_ind_t = torch.cat(Peak_avg_ind_list, dim=0)
+            labels_t = torch.as_tensor(peak_labels, dtype=torch.long, device=data_ind_t.device)
+            pixel_assigns_t = torch.repeat_interleave(labels_t, lengths)
+            self.Data_ind = data_ind_t.detach().cpu().numpy().astype(np.int64, copy=False)
+            self.Pixel_assignments = (
+                pixel_assigns_t.detach().cpu().numpy().astype(np.int64, copy=False)
+            )
+            return
+
+        ind_arrays = []
+        lengths_np = []
+        for inds in Peak_avg_ind_list:
+            if torch.is_tensor(inds):
+                arr = inds.detach().cpu().numpy()
+            else:
+                arr = np.asarray(inds)
+            arr = np.asarray(arr, dtype=np.int64)
+            ind_arrays.append(arr)
+            lengths_np.append(int(arr.shape[0]))
+
+        total = int(np.sum(lengths_np))
+        if total == 0:
+            dim = int(ind_arrays[0].shape[1]) if ind_arrays and ind_arrays[0].ndim == 2 else 0
+            self.Data_ind = np.empty((0, dim), dtype=np.int64)
+            self.Pixel_assignments = np.empty((0,), dtype=np.int64)
+            return
+
+        self.Data_ind = np.concatenate(ind_arrays, axis=0)
+        self.Pixel_assignments = np.repeat(peak_labels, lengths_np).astype(np.int64, copy=False)
 
 
 class Cluster_Gaussian(object):

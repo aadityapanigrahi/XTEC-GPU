@@ -60,7 +60,10 @@ from .Preprocessing import (
 )
 from .GMM import GMM, GMM_kernels
 from .config import CommonRunConfig
-from .streamed_preprocessing import build_streamed_threshold_result
+from .streamed_preprocessing import (
+    build_streamed_peak_averaging,
+    build_streamed_threshold_result,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +187,24 @@ def _build_threshold(data, threshold_enabled: bool, device):
     return Threshold_Background(masked, threshold_type=thresh_type, device=device)
 
 
+def _threshold_d_cache_key(args, common_cfg: CommonRunConfig, device):
+    """Stable cache key for d-mode threshold preprocessing."""
+    return (
+        "threshold_d",
+        args.input,
+        common_cfg.entry,
+        common_cfg.slices,
+        bool(common_cfg.threshold),
+        str(device),
+        bool(getattr(common_cfg, "streamed_preprocess", False)),
+        int(getattr(common_cfg, "streamed_chunk_voxels", 0)),
+        int(getattr(common_cfg, "streamed_reservoir_size", 500000)),
+        int(getattr(common_cfg, "streamed_max_bins", 4096)),
+        int(getattr(common_cfg, "streamed_exact_log_limit", 20000000)),
+        int(getattr(common_cfg, "streamed_seed", 0)),
+    )
+
+
 def _build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
     """Build d-mode thresholding, optionally using streamed preprocessing."""
     use_stream = bool(getattr(common_cfg, "streamed_preprocess", False))
@@ -220,8 +241,65 @@ def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
     if runtime_cache is None:
         return _build_threshold_d(args, data, common_cfg, device)
 
+    key = _threshold_d_cache_key(args, common_cfg, device)
+    if key not in runtime_cache:
+        runtime_cache[key] = _build_threshold_d(args, data, common_cfg, device)
+    return runtime_cache[key]
+
+
+def _build_s_preprocessed(args, data, common_cfg: CommonRunConfig, device):
+    """Construct s-mode preprocessing bundle (threshold + peak averaging)."""
+    use_stream = bool(getattr(common_cfg, "streamed_preprocess", False))
+    if not use_stream:
+        threshold = _build_threshold(data, bool(common_cfg.threshold), device)
+        peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
+        return threshold, peak_avg, peak_avg.peak_avg_data
+
+    if common_cfg.slices not in (None, ""):
+        raise ValueError(
+            "Streamed preprocessing requires unsliced input. "
+            "Remove --slices when using --streamed-preprocess."
+        )
+
+    print(
+        "[XTEC-s] using streamed preprocessing "
+        f"(chunk_voxels_request={common_cfg.streamed_chunk_voxels}, "
+        f"exact_log_limit={common_cfg.streamed_exact_log_limit})"
+    )
+
+    runtime_cache = _runtime_cache_from_args(args)
+    threshold = None
+    threshold_key = _threshold_d_cache_key(args, common_cfg, device)
+    if runtime_cache is not None:
+        threshold = runtime_cache.get(threshold_key)
+
+    if threshold is None:
+        threshold = build_streamed_threshold_result(
+            input_path=args.input,
+            entry_path=common_cfg.entry,
+            threshold_enabled=bool(common_cfg.threshold),
+            device=device,
+            chunk_voxels=int(common_cfg.streamed_chunk_voxels),
+            reservoir_size=int(common_cfg.streamed_reservoir_size),
+            max_bins=int(common_cfg.streamed_max_bins),
+            exact_log_limit=int(common_cfg.streamed_exact_log_limit),
+            seed=int(common_cfg.streamed_seed),
+        )
+        if runtime_cache is not None:
+            runtime_cache[threshold_key] = threshold
+
+    peak_avg = build_streamed_peak_averaging(threshold)
+    return threshold, peak_avg, peak_avg.peak_avg_data
+
+
+def _get_or_build_s_preprocessed(args, data, common_cfg: CommonRunConfig, device):
+    """Reuse s-mode preprocessing bundle when shared runtime cache is present."""
+    runtime_cache = _runtime_cache_from_args(args)
+    if runtime_cache is None:
+        return _build_s_preprocessed(args, data, common_cfg, device)
+
     key = (
-        "threshold_d",
+        "preprocess_s",
         args.input,
         common_cfg.entry,
         common_cfg.slices,
@@ -235,33 +313,7 @@ def _get_or_build_threshold_d(args, data, common_cfg: CommonRunConfig, device):
         int(getattr(common_cfg, "streamed_seed", 0)),
     )
     if key not in runtime_cache:
-        runtime_cache[key] = _build_threshold_d(args, data, common_cfg, device)
-    return runtime_cache[key]
-
-
-def _build_s_preprocessed(data, threshold_enabled: bool, device):
-    """Construct s-mode preprocessing bundle (threshold + peak averaging)."""
-    threshold = _build_threshold(data, threshold_enabled, device)
-    peak_avg = Peak_averaging(data.nxsignal.nxvalue, threshold, device=device)
-    return threshold, peak_avg, peak_avg.peak_avg_data
-
-
-def _get_or_build_s_preprocessed(args, data, common_cfg: CommonRunConfig, device):
-    """Reuse s-mode preprocessing bundle when shared runtime cache is present."""
-    runtime_cache = _runtime_cache_from_args(args)
-    if runtime_cache is None:
-        return _build_s_preprocessed(data, bool(common_cfg.threshold), device)
-
-    key = (
-        "preprocess_s",
-        args.input,
-        common_cfg.entry,
-        common_cfg.slices,
-        bool(common_cfg.threshold),
-        str(device),
-    )
-    if key not in runtime_cache:
-        runtime_cache[key] = _build_s_preprocessed(data, bool(common_cfg.threshold), device)
+        runtime_cache[key] = _build_s_preprocessed(args, data, common_cfg, device)
     return runtime_cache[key]
 
 
@@ -650,13 +702,30 @@ def _save_avg_intensity_plot(temp_values, data_values, cluster_assigns, outdir,
 
 def _plot_qmap(data, Data_ind, pixel_assigns, nc, outdir, prefix=""):
     """Plot and save the cluster Q-map."""
-    cluster_image = np.zeros(data.nxsignal.nxvalue[0].shape)
-
-    for i in range(nc):
-        cluster_mask = pixel_assigns == i
-        c_ind = Data_ind[cluster_mask]
-        c_ind = tuple(np.array(c_ind).T)
-        cluster_image[c_ind] = i + 1
+    signal = data.nxsignal
+    if hasattr(signal, "shape") and len(signal.shape) >= 2:
+        spatial_shape = tuple(int(x) for x in signal.shape[1:])
+    else:
+        # Fallback for unexpected backends that do not expose shape metadata.
+        spatial_shape = np.asarray(signal.nxvalue[0]).shape
+    cluster_image = np.zeros(spatial_shape, dtype=np.int16)
+    data_ind_np = np.asarray(Data_ind)
+    pixel_assigns_np = np.asarray(pixel_assigns)
+    if (
+        data_ind_np.ndim == 2
+        and data_ind_np.shape[0] == pixel_assigns_np.shape[0]
+        and data_ind_np.shape[1] == cluster_image.ndim
+        and data_ind_np.shape[0] > 0
+    ):
+        cluster_image[tuple(data_ind_np.astype(np.int64, copy=False).T)] = (
+            pixel_assigns_np.astype(np.int64, copy=False) + 1
+        )
+    else:
+        for i in range(nc):
+            cluster_mask = pixel_assigns_np == i
+            c_ind = data_ind_np[cluster_mask]
+            c_ind = tuple(np.array(c_ind).T)
+            cluster_image[c_ind] = i + 1
 
     fig, ax = plt.subplots(figsize=(8, 8))
     if cluster_image.ndim == 3:
@@ -1146,7 +1215,27 @@ def run_bic_d(args):
     print(f"[BIC XTEC-d] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
 
-    threshold = _get_or_build_threshold_d(args, data, common_cfg, device)
+    runtime_cache = _runtime_cache_from_args(args)
+    if (
+        bool(common_cfg.streamed_preprocess)
+        and runtime_cache is None
+        and common_cfg.slices in (None, "")
+    ):
+        # Standalone streamed BIC does not consume threshold indices.
+        threshold = build_streamed_threshold_result(
+            input_path=args.input,
+            entry_path=common_cfg.entry,
+            threshold_enabled=bool(common_cfg.threshold),
+            device=device,
+            chunk_voxels=int(common_cfg.streamed_chunk_voxels),
+            reservoir_size=int(common_cfg.streamed_reservoir_size),
+            max_bins=int(common_cfg.streamed_max_bins),
+            exact_log_limit=int(common_cfg.streamed_exact_log_limit),
+            seed=int(common_cfg.streamed_seed),
+            collect_indices=False,
+        )
+    else:
+        threshold = _get_or_build_threshold_d(args, data, common_cfg, device)
     Data_thresh = threshold.data_thresholded
 
     Rescaled_data = _rescale(threshold, Data_thresh, common_cfg.rescale, device)
@@ -1356,8 +1445,8 @@ def build_parser():
             "--streamed-preprocess",
             action="store_true",
             default=False,
-            help="Opt-in streamed preprocessing for large full-data d-mode runs "
-                 "(currently used by xtec-d/bic-d; default: off).",
+            help="Opt-in streamed preprocessing for large full-data runs "
+                 "(used by xtec-d/xtec-s/bic-d/bic-s; default: off).",
         )
         sp.add_argument(
             "--streamed-chunk-voxels",

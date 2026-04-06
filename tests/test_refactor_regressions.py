@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import h5py
 import numpy as np
+import torch
 
 from xtec_gpu.config import AgenticWorkflowConfig
 from xtec_gpu.workflows import agentic
@@ -15,7 +16,13 @@ from xtec_gpu.workflows import WORKFLOW_REPORT_REQUIRED_KEYS
 from xtec_gpu.workflows.shared import build_bic_command
 from xtec_gpu import xtec_cli
 from xtec_gpu.config.run_config import CommonRunConfig
-from xtec_gpu.streamed_preprocessing import _estimate_cutoff, _read_block_full_temperature
+from xtec_gpu.Preprocessing import Peak_averaging
+from xtec_gpu.streamed_preprocessing import (
+    StreamedThresholdResult,
+    _estimate_cutoff,
+    _read_block_full_temperature,
+    build_streamed_peak_averaging,
+)
 from xtec_gpu.xtec_cli import build_parser
 
 
@@ -114,6 +121,29 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertIs(a, b)
             self.assertEqual(build_mock.call_count, 1)
 
+    def test_runtime_cache_reuses_streamed_s_preprocessing(self) -> None:
+        # Guards streamed s-mode caching key includes stream settings.
+        args = SimpleNamespace(input="input.nxs", runtime_cache={})
+        cfg = CommonRunConfig(
+            entry="entry/data",
+            slices=None,
+            threshold=True,
+            device="cpu",
+            streamed_preprocess=True,
+            streamed_chunk_voxels=16,
+            streamed_reservoir_size=32,
+            streamed_max_bins=64,
+            streamed_exact_log_limit=128,
+            streamed_seed=5,
+        )
+        fake_data = object()
+        fake_bundle = (object(), object(), object())
+        with patch.object(xtec_cli, "_build_s_preprocessed", return_value=fake_bundle) as build_mock:
+            a = xtec_cli._get_or_build_s_preprocessed(args, fake_data, cfg, "cpu")
+            b = xtec_cli._get_or_build_s_preprocessed(args, fake_data, cfg, "cpu")
+            self.assertIs(a, b)
+            self.assertEqual(build_mock.call_count, 1)
+
     def test_cli_streamed_preprocess_defaults(self) -> None:
         # Guards Phase 4 CLI defaults: opt-in only.
         parser = build_parser()
@@ -180,6 +210,111 @@ class RefactorRegressionTests(unittest.TestCase):
                 cfg,
                 "cpu",
             )
+
+    def test_streamed_s_preprocess_rejects_runtime_slices(self) -> None:
+        # Guards fail-fast behavior for streamed xtec-s path.
+        cfg = CommonRunConfig(
+            entry="entry/data",
+            slices=":,0:1,-1:1,-1:1",
+            threshold=True,
+            device="cpu",
+            streamed_preprocess=True,
+        )
+        with self.assertRaises(ValueError):
+            xtec_cli._build_s_preprocessed(
+                SimpleNamespace(input="input.nxs", runtime_cache={}),
+                object(),
+                cfg,
+                "cpu",
+            )
+
+    def test_streamed_s_reuses_cached_streamed_threshold_d(self) -> None:
+        # Guards cross-mode reuse: streamed xtec-s should reuse cached d-threshold work.
+        cfg = CommonRunConfig(
+            entry="entry/data",
+            slices=None,
+            threshold=True,
+            device="cpu",
+            streamed_preprocess=True,
+            streamed_chunk_voxels=32,
+            streamed_reservoir_size=64,
+            streamed_max_bins=128,
+            streamed_exact_log_limit=256,
+            streamed_seed=3,
+        )
+        args = SimpleNamespace(input="input.nxs", runtime_cache={})
+        threshold_key = xtec_cli._threshold_d_cache_key(args, cfg, "cpu")
+        fake_threshold = object()
+        args.runtime_cache[threshold_key] = fake_threshold
+        fake_peak = SimpleNamespace(peak_avg_data=torch.ones((2, 1), dtype=torch.float64))
+        with patch.object(xtec_cli, "build_streamed_threshold_result") as build_thr_mock:
+            with patch.object(
+                xtec_cli,
+                "build_streamed_peak_averaging",
+                return_value=fake_peak,
+            ) as build_peak_mock:
+                threshold, peak_avg, data_thresh = xtec_cli._build_s_preprocessed(
+                    args,
+                    object(),
+                    cfg,
+                    "cpu",
+                )
+        self.assertIs(threshold, fake_threshold)
+        self.assertIs(peak_avg, fake_peak)
+        self.assertIs(data_thresh, fake_peak.peak_avg_data)
+        build_thr_mock.assert_not_called()
+        build_peak_mock.assert_called_once_with(fake_threshold)
+
+    def test_bic_d_streamed_standalone_skips_index_collection(self) -> None:
+        # Guards fast path: standalone streamed bic-d should avoid building threshold indices.
+        class _FakeThreshold:
+            def __init__(self):
+                self.data_thresholded = torch.ones((4, 6), dtype=torch.float32)
+
+            def Rescale_mean(self, data):
+                return data
+
+            def Rescale_zscore(self, data):
+                return data
+
+        class _FakeGMM:
+            def __init__(self, _data, n_clusters, cov_type="diag", random_state=0):
+                self.log_likelihood = -float(n_clusters)
+
+            def RunEM(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            args = SimpleNamespace(
+                input="input.nxs",
+                output=td,
+                entry="entry/data",
+                slices=None,
+                threshold=True,
+                rescale="None",
+                device="cpu",
+                streamed_preprocess=True,
+                streamed_chunk_voxels=32,
+                streamed_reservoir_size=64,
+                streamed_max_bins=128,
+                streamed_exact_log_limit=256,
+                streamed_seed=3,
+                min_nc=2,
+                max_nc=4,
+                runtime_cache=None,
+            )
+            with patch.object(xtec_cli, "_get_or_load_data", return_value=object()):
+                with patch.object(
+                    xtec_cli,
+                    "build_streamed_threshold_result",
+                    return_value=_FakeThreshold(),
+                ) as build_thr_mock:
+                    with patch.object(xtec_cli, "GMM", _FakeGMM):
+                        xtec_cli.run_bic_d(args)
+        self.assertTrue(build_thr_mock.called)
+        self.assertFalse(
+            build_thr_mock.call_args.kwargs.get("collect_indices", True)
+        )
 
     def test_streamed_cutoff_uses_exact_kl_path(self) -> None:
         # Guards exact streamed cutoff path and metadata shape.
@@ -254,6 +389,68 @@ class RefactorRegressionTests(unittest.TestCase):
                 )
         self.assertEqual(block.shape[0], data.shape[0])
         self.assertEqual(block.shape[1:], (2, 3, 4))
+
+    def test_streamed_peak_averaging_matches_dense_small_case(self) -> None:
+        # Guards streamed xtec-s peak aggregation parity on a deterministic toy mask.
+        intensity = torch.tensor(
+            [
+                [[1.0, 2.0, 0.0, 0.0],
+                 [0.0, 3.0, 0.0, 0.0],
+                 [0.0, 0.0, 0.0, 0.0],
+                 [0.0, 0.0, 4.0, 0.0]],
+                [[2.0, 4.0, 0.0, 0.0],
+                 [0.0, 6.0, 0.0, 0.0],
+                 [0.0, 0.0, 0.0, 0.0],
+                 [0.0, 0.0, 8.0, 0.0]],
+            ],
+            dtype=torch.float64,
+        )
+        thresholded = np.array(
+            [
+                [True, True, False, False],
+                [False, True, False, False],
+                [False, False, False, False],
+                [False, False, True, False],
+            ],
+            dtype=bool,
+        )
+
+        # Dense reference pathway.
+        dense_threshold = SimpleNamespace(
+            data_shape_orig=tuple(int(x) for x in intensity.shape),
+            thresholded=thresholded,
+        )
+        dense_peak = Peak_averaging(intensity, dense_threshold, device="cpu")
+
+        # Streamed-compatible sparse threshold bundle with identical mask/data.
+        ind_np = np.argwhere(thresholded).astype(np.int64, copy=False)
+        data_thresh_np = intensity.detach().cpu().numpy().reshape(intensity.shape[0], -1)[:, thresholded.reshape(-1)]
+        streamed_threshold = StreamedThresholdResult(
+            device=torch.device("cpu"),
+            data_shape_orig=tuple(int(x) for x in intensity.shape),
+            threshold_type="KL-streamed",
+            logi_cutoff=0.0,
+            data_thresholded=torch.as_tensor(data_thresh_np, dtype=torch.float64),
+            ind_thresholded=torch.as_tensor(ind_np, dtype=torch.long),
+            diagnostics={"success": True},
+        )
+        streamed_peak = build_streamed_peak_averaging(streamed_threshold)
+
+        self.assertEqual(
+            tuple(int(x) for x in streamed_peak.peak_avg_data.shape),
+            tuple(int(x) for x in dense_peak.peak_avg_data.shape),
+        )
+        self.assertTrue(
+            torch.allclose(
+                streamed_peak.peak_avg_data.cpu(),
+                dense_peak.peak_avg_data.cpu(),
+                atol=1e-12,
+                rtol=0.0,
+            )
+        )
+        self.assertEqual(len(streamed_peak.peak_avg_ind_list), len(dense_peak.peak_avg_ind_list))
+        for got, ref in zip(streamed_peak.peak_avg_ind_list, dense_peak.peak_avg_ind_list):
+            self.assertTrue(np.array_equal(got.cpu().numpy(), ref.cpu().numpy()))
 
 
 if __name__ == "__main__":
