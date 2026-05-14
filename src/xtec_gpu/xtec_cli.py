@@ -39,10 +39,12 @@ Does not own:
 """
 
 import argparse
+import json
 import os
 import pickle
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import matplotlib
@@ -90,7 +92,7 @@ def _common_config_from_args(args) -> CommonRunConfig:
         streamed_chunk_voxels=int(getattr(args, "streamed_chunk_voxels", 0)),
         streamed_reservoir_size=int(getattr(args, "streamed_reservoir_size", 500000)),
         streamed_max_bins=int(getattr(args, "streamed_max_bins", 4096)),
-        streamed_exact_log_limit=int(getattr(args, "streamed_exact_log_limit", 20000000)),
+        streamed_exact_log_limit=int(getattr(args, "streamed_exact_log_limit", 50000000)),
         streamed_seed=int(getattr(args, "streamed_seed", 0)),
     )
 
@@ -200,7 +202,7 @@ def _threshold_d_cache_key(args, common_cfg: CommonRunConfig, device):
         int(getattr(common_cfg, "streamed_chunk_voxels", 0)),
         int(getattr(common_cfg, "streamed_reservoir_size", 500000)),
         int(getattr(common_cfg, "streamed_max_bins", 4096)),
-        int(getattr(common_cfg, "streamed_exact_log_limit", 20000000)),
+        int(getattr(common_cfg, "streamed_exact_log_limit", 50000000)),
         int(getattr(common_cfg, "streamed_seed", 0)),
     )
 
@@ -309,7 +311,7 @@ def _get_or_build_s_preprocessed(args, data, common_cfg: CommonRunConfig, device
         int(getattr(common_cfg, "streamed_chunk_voxels", 0)),
         int(getattr(common_cfg, "streamed_reservoir_size", 500000)),
         int(getattr(common_cfg, "streamed_max_bins", 4096)),
-        int(getattr(common_cfg, "streamed_exact_log_limit", 20000000)),
+        int(getattr(common_cfg, "streamed_exact_log_limit", 50000000)),
         int(getattr(common_cfg, "streamed_seed", 0)),
     )
     if key not in runtime_cache:
@@ -574,9 +576,24 @@ def _reorder_clusters(cluster_assigns, pixel_assigns, cluster_means,
 
 def _save_results(outdir, cluster_assigns, pixel_assigns, Data_ind,
                   Data_thresh, cluster_means, cluster_covs, prefix=""):
-    """Save clustering results as an HDF5 file."""
+    """Save clustering results as an HDF5 file.
+
+    Enforces the shape contract documented in OUTPUT_CONTRACT.md:
+    ``pixel_assignments`` must align with ``data_indices`` row-for-row, so
+    any downstream consumer can index spatial coordinates by pixel label
+    without needing to know whether the run was d-mode or s-mode.
+    """
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, f"{prefix}results.h5")
+
+    pixel_assigns_np = np.asarray(pixel_assigns)
+    data_ind_np = np.asarray(Data_ind)
+    if pixel_assigns_np.shape[0] != data_ind_np.shape[0]:
+        raise ValueError(
+            "pixel_assignments must align with data_indices "
+            f"(got {pixel_assigns_np.shape[0]} vs {data_ind_np.shape[0]}). "
+            "See OUTPUT_CONTRACT.md."
+        )
 
     with h5py.File(path, "w") as f:
         f.create_dataset("cluster_assignments", data=cluster_assigns)
@@ -700,15 +717,33 @@ def _save_avg_intensity_plot(temp_values, data_values, cluster_assigns, outdir,
     _save_figure(os.path.join(outdir, filename))
 
 
-def _plot_qmap(data, Data_ind, pixel_assigns, nc, outdir, prefix=""):
-    """Plot and save the cluster Q-map."""
-    signal = data.nxsignal
-    if hasattr(signal, "shape") and len(signal.shape) >= 2:
-        spatial_shape = tuple(int(x) for x in signal.shape[1:])
-    else:
-        # Fallback for unexpected backends that do not expose shape metadata.
-        spatial_shape = np.asarray(signal.nxvalue[0]).shape
-    cluster_image = np.zeros(spatial_shape, dtype=np.int16)
+def _qmap_discrete_cmap(nc):
+    """Discrete colormap + boundary norm shared across qmap plotters.
+
+    Returns (cmap_with_sentinel, norm_with_sentinel, cluster_only_cmap,
+    cluster_only_norm, cluster_colors). The "with_sentinel" pair is used for
+    the image itself (sentinel = white background); the "cluster_only" pair
+    is used for the colorbar so it doesn't show a white bin.
+    """
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    cluster_colors = [f"C{i}" for i in range(max(1, nc))]
+    cmap = ListedColormap(["white"] + cluster_colors)
+    cmap.set_bad(color="white")
+    norm = BoundaryNorm(np.arange(-1.5, nc + 0.5, 1.0), ncolors=cmap.N)
+    bar_cmap = ListedColormap(cluster_colors)
+    bar_norm = BoundaryNorm(np.arange(-0.5, nc + 0.5, 1.0), ncolors=bar_cmap.N)
+    return cmap, norm, bar_cmap, bar_norm, cluster_colors
+
+
+def _build_cluster_volume(spatial_shape, Data_ind, pixel_assigns, nc):
+    """Scatter cluster labels into a dense voxel array; -1 = unassigned.
+
+    Used as the shared backbone for both the slice view and the projection
+    view. Returns ``cluster_image`` and the ``data_ind`` array (numpy) for
+    callers that want to do projection math without re-converting.
+    """
+    cluster_image = np.full(spatial_shape, -1, dtype=np.int32)
     data_ind_np = np.asarray(Data_ind)
     pixel_assigns_np = np.asarray(pixel_assigns)
     if (
@@ -718,33 +753,166 @@ def _plot_qmap(data, Data_ind, pixel_assigns, nc, outdir, prefix=""):
         and data_ind_np.shape[0] > 0
     ):
         cluster_image[tuple(data_ind_np.astype(np.int64, copy=False).T)] = (
-            pixel_assigns_np.astype(np.int64, copy=False) + 1
+            pixel_assigns_np.astype(np.int64, copy=False)
         )
     else:
         for i in range(nc):
             cluster_mask = pixel_assigns_np == i
             c_ind = data_ind_np[cluster_mask]
             c_ind = tuple(np.array(c_ind).T)
-            cluster_image[c_ind] = i + 1
+            cluster_image[c_ind] = i
+    return cluster_image, data_ind_np, pixel_assigns_np
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+
+def _pick_densest_slice(cluster_image, axis=0):
+    """Return the slice index along ``axis`` with the most assigned voxels.
+
+    Beats the historical "midpoint" choice when the data is sparse along
+    that axis (Bragg peaks sit on integer reciprocal-lattice planes; the
+    midpoint of a 72-step axis routinely lands between planes and shows
+    almost nothing of the minority cluster).
+    """
+    nd = cluster_image.ndim
+    other_axes = tuple(a for a in range(nd) if a != axis)
+    assigned_per_slice = (cluster_image >= 0).sum(axis=other_axes)
+    if int(assigned_per_slice.max()) == 0:
+        return cluster_image.shape[axis] // 2
+    return int(np.argmax(assigned_per_slice))
+
+
+def _majority_projection(cluster_image, axis=0, nc=0):
+    """Per-(other-axes) cell, return the cluster ID that appears most often
+    along ``axis``. Cells with no assignment anywhere along ``axis`` stay -1.
+
+    Vectorized via per-cluster counts: for each cluster c, count occurrences
+    along ``axis``; argmax across the cluster axis gives the dominant cluster.
+    """
+    if nc <= 0:
+        # Empty edge case: return an unassigned slab of the right shape.
+        shp = tuple(s for a, s in enumerate(cluster_image.shape) if a != axis)
+        return np.full(shp, -1, dtype=np.int32)
+    counts = np.stack(
+        [(cluster_image == c).sum(axis=axis).astype(np.int32) for c in range(nc)],
+        axis=0,
+    )  # (nc, *other_axes)
+    any_assigned = counts.sum(axis=0) > 0
+    dominant = counts.argmax(axis=0).astype(np.int32)
+    dominant[~any_assigned] = -1
+    return dominant
+
+
+def _save_qmap_panel(
+    panel, nc, cmap, norm, bar_cmap, bar_norm, title, out_path,
+):
+    """Render one qmap panel (2D array of cluster IDs, -1 = background).
+
+    Higher DPI than the legacy plot (200 vs 150) so single-pixel clusters
+    are actually visible. figsize is kept at 9 x 9 so the image fills the
+    bounding box; combined with ``interpolation="nearest"`` this keeps
+    cluster pixels sharp.
+    """
+    fig, ax = plt.subplots(figsize=(9, 9), facecolor="white")
+    ax.set_facecolor("white")
+    im = ax.imshow(
+        panel, origin="lower", cmap=cmap, norm=norm, interpolation="nearest",
+    )
+    ax.set_title(title)
+    sm = plt.cm.ScalarMappable(cmap=bar_cmap, norm=bar_norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, ticks=list(range(nc)), label="Cluster ID")
+    cbar.ax.set_yticklabels([f"Cluster {i + 1}" for i in range(nc)])
+    fig.savefig(out_path, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def _plot_qmap(data, Data_ind, pixel_assigns, nc, outdir, prefix="",
+               slice_index=None, slice_axis=0):
+    """Plot and save the cluster Q-map.
+
+    Behavior depends on the dimensionality of the underlying spatial volume:
+
+    - **3D data (the common case for srn0_XTEC)**:
+      - ``qmap.png``: a single 2D slice taken along ``slice_axis``. If
+        ``slice_index`` is ``None``, the slice with the most assigned
+        voxels is chosen automatically — this avoids the legacy
+        "midpoint" pick that routinely landed on a slice with almost no
+        Bragg peaks because peaks sit on integer reciprocal-lattice planes.
+      - ``qmap_projection.png``: the dominant cluster at each
+        (other-axes) cell, taken across ``slice_axis``. Shows every
+        cluster regardless of where it lives along the projection axis.
+    - **2D data**: just ``qmap.png`` of the full plane.
+
+    Color contract: cluster ``i`` is drawn in matplotlib's discrete tab
+    color ``Ci`` — the same color used by the trajectories and
+    avg-intensities plots. Unassigned voxels are white.
+
+    Returns a small dict describing what was rendered (which slice was
+    picked, etc.), so callers can record it in ``timing.json``.
+    """
+    signal = data.nxsignal
+    if hasattr(signal, "shape") and len(signal.shape) >= 2:
+        spatial_shape = tuple(int(x) for x in signal.shape[1:])
+    else:
+        spatial_shape = np.asarray(signal.nxvalue[0]).shape
+
+    cluster_image, _, _ = _build_cluster_volume(
+        spatial_shape, Data_ind, pixel_assigns, nc,
+    )
+    cmap, norm, bar_cmap, bar_norm, _ = _qmap_discrete_cmap(nc)
+
+    info = {"prefix": prefix, "nc": int(nc)}
+
     if cluster_image.ndim == 3:
-        mid = cluster_image.shape[0] // 2
-        im = ax.imshow(cluster_image[mid], origin="lower", cmap="viridis")
-        ax.set_title(f"Cluster Q Map (Slice {mid})")
+        if slice_index is None:
+            slice_index = _pick_densest_slice(cluster_image, axis=slice_axis)
+        slice_index = int(slice_index)
+        # Build the 2D panel along the requested axis.
+        panel = np.take(cluster_image, slice_index, axis=slice_axis)
+        n_assigned = int((panel >= 0).sum())
+        _save_qmap_panel(
+            panel, nc, cmap, norm, bar_cmap, bar_norm,
+            title=(f"Cluster Q Map  (axis {slice_axis} index {slice_index}, "
+                   f"{n_assigned} assigned voxels)"),
+            out_path=os.path.join(outdir, f"{prefix}qmap.png"),
+        )
+        info["slice_axis"] = int(slice_axis)
+        info["slice_index"] = slice_index
+        info["slice_pixels_assigned"] = n_assigned
+        print(f"  Q-map saved to {os.path.join(outdir, f'{prefix}qmap.png')} "
+              f"(axis {slice_axis} index {slice_index}, "
+              f"{n_assigned} assigned voxels)")
+
+        # Projection across the slice axis: shows every cluster everywhere.
+        projection = _majority_projection(cluster_image, axis=slice_axis, nc=nc)
+        proj_path = os.path.join(outdir, f"{prefix}qmap_projection.png")
+        proj_assigned = int((projection >= 0).sum())
+        _save_qmap_panel(
+            projection, nc, cmap, norm, bar_cmap, bar_norm,
+            title=(f"Cluster Q Map  (dominant cluster across axis "
+                   f"{slice_axis}, {proj_assigned} cells assigned)"),
+            out_path=proj_path,
+        )
+        info["projection_axis"] = int(slice_axis)
+        info["projection_cells_assigned"] = proj_assigned
+        print(f"  Q-map projection saved to {proj_path} "
+              f"({proj_assigned} cells)")
     elif cluster_image.ndim == 2:
-        im = ax.imshow(cluster_image, origin="lower", cmap="viridis")
-        ax.set_title("Cluster Q Map")
+        n_assigned = int((cluster_image >= 0).sum())
+        _save_qmap_panel(
+            cluster_image, nc, cmap, norm, bar_cmap, bar_norm,
+            title=f"Cluster Q Map  ({n_assigned} assigned voxels)",
+            out_path=os.path.join(outdir, f"{prefix}qmap.png"),
+        )
+        info["slice_axis"] = None
+        info["slice_index"] = None
+        info["slice_pixels_assigned"] = n_assigned
+        print(f"  Q-map saved to {os.path.join(outdir, f'{prefix}qmap.png')} "
+              f"({n_assigned} assigned voxels)")
     else:
         print("  Q-map has unsupported shape, skipping plot.")
-        plt.close(fig)
-        return
-        
-    plt.colorbar(im, ax=ax, label="Cluster ID")
-    path = os.path.join(outdir, f"{prefix}qmap.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Q-map saved to {path}")
+        return info
+
+    return info
 
 
 def _plot_trajectories(data, cluster_means, cluster_covs, nc, rescale,
@@ -1206,11 +1374,182 @@ def run_label_smooth(args):
                           args.output)
 
 
+def _init_slug(init: str) -> str:
+    """Filename-safe slug for an init strategy. Kept local to avoid a circular import."""
+    return {
+        "kmeans++": "kmeanspp",
+        "sklearn-kmeans": "sklearnkmeans",
+        "cuml-kmeans": "cumlkmeans",
+        "xtec": "xtec",
+    }.get(init, init.replace("+", "p").replace("-", ""))
+
+
+def _save_inline_run_d(
+    *,
+    save_inline: Dict[str, Any],
+    data,
+    threshold,
+    Data_thresh,
+    clusterGMM,
+    k: int,
+    bic_value: float,
+    stage_times: Dict[str, float],
+    fit_start: float,
+) -> None:
+    """Save the per-(mode, k, init) artifact bundle for d-mode using a fitted GMM.
+
+    Called inline from ``run_bic_d`` when ``save_artifacts_inline`` is present
+    on ``args``. Avoids the second full GMM fit that ``xtec-d`` would do.
+    """
+    runs_root: Path = save_inline["runs_root"]
+    init = save_inline["init"]
+    rid = f"d_k{int(k):02d}_{_init_slug(init)}"
+    run_dir = Path(runs_root) / rid
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+    cluster_means = _to_numpy(clusterGMM.means)
+    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(int(k))]
+    Data_thresh_np = _to_numpy(Data_thresh)
+    Data_ind_np = _to_numpy(threshold.ind_thresholded)
+
+    if save_inline["reorder_clusters"]:
+        temp_values = data.nxaxes[0].nxvalue
+        cluster_assigns, _pa, cluster_means, cluster_covs = _reorder_clusters(
+            cluster_assigns, cluster_assigns,
+            cluster_means, cluster_covs,
+            Data_thresh_np, int(k), temp_values,
+        )
+        _sync_cluster_model(clusterGMM, cluster_assigns, cluster_means, cluster_covs)
+
+    t_save = time.time()
+    _save_results(
+        str(run_dir), cluster_assigns, cluster_assigns,
+        Data_ind_np, Data_thresh_np, cluster_means, cluster_covs,
+    )
+    stage_times["save_results_s"] = time.time() - t_save
+
+    plots_level = save_inline.get("plots_level", "all")
+    qmap_info: Optional[Dict[str, Any]] = None
+    if plots_level in ("all", "primary"):
+        t_q = time.time()
+        qmap_info = _plot_qmap(
+            data, Data_ind_np, cluster_assigns, int(k), str(run_dir),
+        )
+        stage_times["plot_qmap_s"] = time.time() - t_q
+        t_t = time.time()
+        _plot_trajectories(
+            data, cluster_means, cluster_covs, int(k),
+            save_inline.get("rescale", "mean"), str(run_dir),
+        )
+        stage_times["plot_trajectories_s"] = time.time() - t_t
+        t_a = time.time()
+        _plot_avg_intensities(
+            data, Data_thresh_np, cluster_assigns, int(k), str(run_dir),
+        )
+        stage_times["plot_avg_intensities_s"] = time.time() - t_a
+
+    timing_payload = {
+        "wall_s": time.time() - fit_start,
+        "bic": float(bic_value),
+        "cluster_sizes": [int(np.sum(cluster_assigns == c)) for c in range(int(k))],
+        "stages": stage_times,
+    }
+    if qmap_info is not None:
+        timing_payload["qmap"] = qmap_info
+    (run_dir / "timing.json").write_text(json.dumps(timing_payload, indent=2))
+
+
+def _save_inline_run_s(
+    *,
+    save_inline: Dict[str, Any],
+    data,
+    threshold,
+    Peak_avg,
+    Data_thresh,
+    clusterGMM,
+    k: int,
+    bic_value: float,
+    stage_times: Dict[str, float],
+    fit_start: float,
+) -> None:
+    """Save the per-(mode, k, init) artifact bundle for s-mode using a fitted GMM.
+
+    Requires that ``clusterGMM.Get_pixel_labels(Peak_avg)`` has already been
+    called by the caller so pixel-level data is available.
+    """
+    runs_root: Path = save_inline["runs_root"]
+    init = save_inline["init"]
+    rid = f"s_k{int(k):02d}_{_init_slug(init)}"
+    run_dir = Path(runs_root) / rid
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    Data_thresh_np = _to_numpy(Data_thresh)
+    Data_ind_np = _to_numpy(clusterGMM.Data_ind)
+    cluster_assigns = _to_numpy(clusterGMM.cluster_assignments)
+    pixel_assigns = _to_numpy(clusterGMM.Pixel_assignments)
+    cluster_means = _to_numpy(clusterGMM.means)
+    cluster_covs = [_to_numpy(clusterGMM.cluster[i].cov) for i in range(int(k))]
+
+    if save_inline["reorder_clusters"]:
+        temp_values = data.nxaxes[0].nxvalue
+        cluster_assigns, pixel_assigns, cluster_means, cluster_covs = \
+            _reorder_clusters(
+                cluster_assigns, pixel_assigns,
+                cluster_means, cluster_covs,
+                Data_thresh_np, int(k), temp_values,
+            )
+
+    t_save = time.time()
+    _save_results(
+        str(run_dir), cluster_assigns, pixel_assigns,
+        Data_ind_np, Data_thresh_np, cluster_means, cluster_covs,
+    )
+    stage_times["save_results_s"] = time.time() - t_save
+
+    plots_level = save_inline.get("plots_level", "all")
+    qmap_info: Optional[Dict[str, Any]] = None
+    if plots_level in ("all", "primary"):
+        t_q = time.time()
+        qmap_info = _plot_qmap(
+            data, Data_ind_np, pixel_assigns, int(k), str(run_dir),
+        )
+        stage_times["plot_qmap_s"] = time.time() - t_q
+        t_t = time.time()
+        _plot_trajectories(
+            data, cluster_means, cluster_covs, int(k),
+            save_inline.get("rescale", "mean"), str(run_dir),
+        )
+        stage_times["plot_trajectories_s"] = time.time() - t_t
+        t_a = time.time()
+        _plot_avg_intensities(
+            data, Data_thresh_np, cluster_assigns, int(k), str(run_dir),
+        )
+        stage_times["plot_avg_intensities_s"] = time.time() - t_a
+
+    timing_payload = {
+        "wall_s": time.time() - fit_start,
+        "bic": float(bic_value),
+        "cluster_sizes": [int(np.sum(cluster_assigns == c)) for c in range(int(k))],
+        "stages": stage_times,
+    }
+    if qmap_info is not None:
+        timing_payload["qmap"] = qmap_info
+    (run_dir / "timing.json").write_text(json.dumps(timing_payload, indent=2))
+
+
 def run_bic_d(args):
-    """BIC score sweep for XTEC-d (torchgmm)."""
+    """BIC score sweep for XTEC-d (torchgmm).
+
+    When ``args.save_artifacts_inline`` is set to a payload dict, the per-k
+    fitted GMM is also dumped to disk under ``payload['runs_root']`` as a full
+    artifact bundle (``results.h5`` + plots + ``timing.json``). This avoids
+    the second full GMM fit that the full-sweep workflow would otherwise need.
+    """
     common_cfg = _common_config_from_args(args)
     data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
+    save_inline: Optional[Dict[str, Any]] = getattr(args, "save_artifacts_inline", None)
 
     print(f"[BIC XTEC-d] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
@@ -1220,6 +1559,7 @@ def run_bic_d(args):
         bool(common_cfg.streamed_preprocess)
         and runtime_cache is None
         and common_cfg.slices in (None, "")
+        and save_inline is None
     ):
         # Standalone streamed BIC does not consume threshold indices.
         threshold = build_streamed_threshold_result(
@@ -1245,19 +1585,53 @@ def run_bic_d(args):
 
     ks = np.arange(args.min_nc, args.max_nc)
     bics = []
+    timings_per_k: Dict[int, Dict[str, Any]] = {}
+    inline_init = save_inline["init"] if save_inline else "kmeans++"
+    inline_random_state = save_inline["random_state"] if save_inline else 0
+
     for k in ks:
-        clusterGMM = GMM(Data_for_GMM, int(k), cov_type="diag", random_state=0)
-        clusterGMM.RunEM()
-        bics.append(
-            _bic_from_loglikelihood(
-                clusterGMM.log_likelihood,
-                n_components=int(k),
-                n_features=n_features,
-                n_samples=n_samples,
-                cov_type="diag",
-            )
+        fit_start = time.time()
+        stage_times: Dict[str, float] = {}
+        t_gmm = time.time()
+        clusterGMM = GMM(
+            Data_for_GMM, int(k),
+            cov_type="diag",
+            init_strategy_mode=inline_init,
+            random_state=inline_random_state,
         )
-        print(f"  k={k}: BIC={bics[-1]:.2f}")
+        clusterGMM.RunEM()
+        stage_times["gmm_fit_s"] = time.time() - t_gmm
+        bic_value = _bic_from_loglikelihood(
+            clusterGMM.log_likelihood,
+            n_components=int(k),
+            n_features=n_features,
+            n_samples=n_samples,
+            cov_type="diag",
+        )
+        bics.append(bic_value)
+        print(f"  k={k}: BIC={bic_value:.2f}")
+
+        if save_inline is not None:
+            _save_inline_run_d(
+                save_inline=save_inline,
+                data=data,
+                threshold=threshold,
+                Data_thresh=Data_thresh,
+                clusterGMM=clusterGMM,
+                k=int(k),
+                bic_value=bic_value,
+                stage_times=stage_times,
+                fit_start=fit_start,
+            )
+            timings_per_k[int(k)] = {
+                "wall_s": time.time() - fit_start,
+                "bic": float(bic_value),
+                "cluster_sizes": [
+                    int(np.sum(_to_numpy(clusterGMM.cluster_assignments) == c))
+                    for c in range(int(k))
+                ],
+                "stages": stage_times,
+            }
 
     os.makedirs(args.output, exist_ok=True)
     with h5py.File(os.path.join(args.output, "bic_xtec_d.h5"), "w") as f:
@@ -1274,17 +1648,28 @@ def run_bic_d(args):
     plt.close(fig)
     print(f"  BIC plot saved to {path}")
 
+    if save_inline is not None:
+        return {
+            "ks": [int(x) for x in ks],
+            "bics": [float(x) for x in bics],
+            "timings": timings_per_k,
+        }
+
 
 def run_bic_s(args):
-    """BIC score sweep for XTEC-s (peak averaging, torchgmm)."""
+    """BIC score sweep for XTEC-s (peak averaging, torchgmm).
+
+    Honors the same ``args.save_artifacts_inline`` payload as ``run_bic_d``.
+    """
     common_cfg = _common_config_from_args(args)
     data = _get_or_load_data(args, common_cfg.entry, common_cfg.slices)
     device = _get_device(common_cfg.device)
+    save_inline: Optional[Dict[str, Any]] = getattr(args, "save_artifacts_inline", None)
 
     print(f"[BIC XTEC-s] nc={args.min_nc}..{args.max_nc} | "
           f"threshold={common_cfg.threshold} | rescale={common_cfg.rescale}")
 
-    threshold, _peak_avg, Data_thresh = _get_or_build_s_preprocessed(
+    threshold, Peak_avg, Data_thresh = _get_or_build_s_preprocessed(
         args, data, common_cfg, device
     )
 
@@ -1295,19 +1680,59 @@ def run_bic_s(args):
 
     ks = np.arange(args.min_nc, args.max_nc)
     bics = []
+    timings_per_k: Dict[int, Dict[str, Any]] = {}
+    inline_init = save_inline["init"] if save_inline else "kmeans++"
+    inline_random_state = save_inline["random_state"] if save_inline else 0
+
     for k in ks:
-        clusterGMM = GMM(Data_for_GMM, int(k), cov_type="diag", random_state=0)
-        clusterGMM.RunEM()
-        bics.append(
-            _bic_from_loglikelihood(
-                clusterGMM.log_likelihood,
-                n_components=int(k),
-                n_features=n_features,
-                n_samples=n_samples,
-                cov_type="diag",
-            )
+        fit_start = time.time()
+        stage_times: Dict[str, float] = {}
+        t_gmm = time.time()
+        clusterGMM = GMM(
+            Data_for_GMM, int(k),
+            cov_type="diag",
+            init_strategy_mode=inline_init,
+            random_state=inline_random_state,
         )
-        print(f"  k={k}: BIC={bics[-1]:.2f}")
+        clusterGMM.RunEM()
+        stage_times["gmm_fit_s"] = time.time() - t_gmm
+
+        if save_inline is not None:
+            # Pixel-label expansion is required before artifact dump for s-mode.
+            clusterGMM.Get_pixel_labels(Peak_avg)
+
+        bic_value = _bic_from_loglikelihood(
+            clusterGMM.log_likelihood,
+            n_components=int(k),
+            n_features=n_features,
+            n_samples=n_samples,
+            cov_type="diag",
+        )
+        bics.append(bic_value)
+        print(f"  k={k}: BIC={bic_value:.2f}")
+
+        if save_inline is not None:
+            _save_inline_run_s(
+                save_inline=save_inline,
+                data=data,
+                threshold=threshold,
+                Peak_avg=Peak_avg,
+                Data_thresh=Data_thresh,
+                clusterGMM=clusterGMM,
+                k=int(k),
+                bic_value=bic_value,
+                stage_times=stage_times,
+                fit_start=fit_start,
+            )
+            timings_per_k[int(k)] = {
+                "wall_s": time.time() - fit_start,
+                "bic": float(bic_value),
+                "cluster_sizes": [
+                    int(np.sum(_to_numpy(clusterGMM.cluster_assignments) == c))
+                    for c in range(int(k))
+                ],
+                "stages": stage_times,
+            }
 
     os.makedirs(args.output, exist_ok=True)
     with h5py.File(os.path.join(args.output, "bic_xtec_s.h5"), "w") as f:
@@ -1323,6 +1748,13 @@ def run_bic_s(args):
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  BIC plot saved to {path}")
+
+    if save_inline is not None:
+        return {
+            "ks": [int(x) for x in ks],
+            "bics": [float(x) for x in bics],
+            "timings": timings_per_k,
+        }
 
 
 def run_test(args):
@@ -1472,9 +1904,11 @@ def build_parser():
         sp.add_argument(
             "--streamed-exact-log-limit",
             type=int,
-            default=20000000,
+            default=50000000,
             help="Maximum valid log-mean count for exact streamed KL cutoff "
-                 "before fail-fast error (default: 20000000).",
+                 "before fail-fast error. Default 50M accommodates the "
+                 "production 20 GB SrN dataset (~24M valid voxels); raise "
+                 "further for larger volumes (default: 50000000).",
         )
         sp.add_argument(
             "--streamed-seed",
@@ -1645,6 +2079,40 @@ def build_parser():
     sp_t.add_argument("--device", default="auto", type=str,
                       help="Compute device: 'auto', 'cpu', 'cuda', 'cuda:1', 'mps' (default: 'auto')")
     sp_t.set_defaults(func=run_test)
+
+    # -- full-sweep -------------------------------------------------------
+    from xtec_gpu.workflows.sweep import (
+        add_full_sweep_arguments,
+        run_full_sweep_cli,
+        run_judge_cli,
+        run_inspect_cli,
+    )
+    sp_fs = subparsers.add_parser(
+        "full-sweep",
+        help="Exhaustive (mode, k, init) sweep with agent-judged recommendation",
+    )
+    add_full_sweep_arguments(sp_fs)
+    sp_fs.set_defaults(func=run_full_sweep_cli)
+
+    # -- full-sweep-judge -------------------------------------------------
+    sp_fj = subparsers.add_parser(
+        "full-sweep-judge",
+        help="Re-score an existing sweep without re-clustering",
+    )
+    sp_fj.add_argument("output_root", help="Sweep directory written by full-sweep")
+    sp_fj.add_argument("--judge-weights", default=None,
+                       help="Path to JSON with weight overrides")
+    sp_fj.add_argument("--judge-top-n", type=int, default=5)
+    sp_fj.set_defaults(func=run_judge_cli)
+
+    # -- full-sweep-inspect -----------------------------------------------
+    sp_fi = subparsers.add_parser(
+        "full-sweep-inspect",
+        help="Print top-N candidates and artifact paths for a sweep",
+    )
+    sp_fi.add_argument("output_root", help="Sweep directory written by full-sweep")
+    sp_fi.add_argument("--top", type=int, default=5)
+    sp_fi.set_defaults(func=run_inspect_cli)
 
     return parser
 

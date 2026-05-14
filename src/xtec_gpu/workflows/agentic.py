@@ -370,7 +370,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--streamed-chunk-voxels", type=int, default=0)
     p.add_argument("--streamed-reservoir-size", type=int, default=500000)
     p.add_argument("--streamed-max-bins", type=int, default=4096)
-    p.add_argument("--streamed-exact-log-limit", type=int, default=20000000)
+    p.add_argument("--streamed-exact-log-limit", type=int, default=50000000)
     p.add_argument("--streamed-seed", type=int, default=0)
     p.add_argument("--min-nc", type=int, default=2)
     p.add_argument("--max-nc", type=int, default=14)

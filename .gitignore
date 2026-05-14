@@ -11,6 +11,7 @@ dist/
 *.h5
 tutorial_cli_runs/
 comparison_runs/
+sweep_runs/
 venv/
 .venv/
 *.sh

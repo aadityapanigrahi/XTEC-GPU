@@ -75,10 +75,14 @@ Additional documentation:
 - Workflow orchestration:
   - `src/xtec_gpu/workflows/agentic.py`
   - `src/xtec_gpu/workflows/comparison.py`
+  - `src/xtec_gpu/workflows/sweep.py`
+  - `src/xtec_gpu/workflows/judge.py`
 - Shared workflow helpers:
   - `src/xtec_gpu/workflows/shared.py`
+  - `src/xtec_gpu/workflows/sweep_types.py`
 - Script entry points:
   - `scripts/xtec_agentic_workflow.py`
+  - `scripts/xtec_full_sweep.py`
   - `scripts/xtec_workflow_mcp.py`
   - `scripts/generate_cpu_gpu_tutorial_outputs.py`
 
@@ -167,6 +171,9 @@ xtec-gpu label-smooth data.nxs -o results/ -n 4 --L-scale 0.05
 xtec-gpu bic-d data.nxs -o results/ --min-nc 2 --max-nc 14
 xtec-gpu bic-s data.nxs -o results/ --min-nc 2 --max-nc 14
 
+# Full sweep (exhaustive across mode/k/init with agent-judged recommendation)
+xtec-gpu full-sweep data.nxs -o sweep_runs/run1 --device cuda:1 --min-nc 2 --max-nc 8
+
 # Optional: streamed preprocessing for large/full-data runs (d and s)
 xtec-gpu bic-d data.nxs -o results/ --streamed-preprocess --streamed-chunk-voxels 0
 xtec-gpu bic-s data.nxs -o results/ --streamed-preprocess --streamed-chunk-voxels 0
@@ -220,7 +227,7 @@ python scripts/xtec_workflow_mcp.py
 | `--streamed-chunk-voxels` | `0` | Spatial voxels per streamed slab; `<=0` enables auto mode targeting ~1 GiB chunks |
 | `--streamed-reservoir-size` | `500000` | Legacy compatibility knob (not used by exact streamed cutoff path) |
 | `--streamed-max-bins` | `4096` | Legacy compatibility knob (not used by exact streamed cutoff path) |
-| `--streamed-exact-log-limit` | `20000000` | Fail-fast guard for exact streamed cutoff (`n_valid` must not exceed this limit) |
+| `--streamed-exact-log-limit` | `50000000` | Fail-fast guard for exact streamed cutoff (`n_valid` must not exceed this limit). Default sized for the 20 GB production dataset. |
 | `--streamed-seed` | `0` | Legacy compatibility knob (not used by exact streamed cutoff path) |
 | `--no-run-final` | off | Skip final recommended command execution (recommendation-only mode) |
 | `--no-save-sweep-artifacts` | off | Skip per-`k` sweep artifact runs |

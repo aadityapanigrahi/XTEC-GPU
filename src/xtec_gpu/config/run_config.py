@@ -21,7 +21,7 @@ class CommonRunConfig:
     streamed_chunk_voxels: int = 0
     streamed_reservoir_size: int = 500000
     streamed_max_bins: int = 4096
-    streamed_exact_log_limit: int = 20000000
+    streamed_exact_log_limit: int = 50000000
     streamed_seed: int = 0
 
 
